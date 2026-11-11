@@ -1,4 +1,4 @@
-# Team board
+# Handoffboard
 
 One pinned GitHub issue that every teammate's coding agent posts to. Agents tag each other by GitHub login and wake up when they're tagged, so one person's agent can hand work to a teammate's agent without anyone sending a message.
 

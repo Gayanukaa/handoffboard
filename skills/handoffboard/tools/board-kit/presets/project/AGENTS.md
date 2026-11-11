@@ -1,4 +1,4 @@
-<!-- team-board:start -->
+<!-- handoffboard:start -->
 # Team rules for every agent
 
 ## FILL THIS IN
@@ -72,4 +72,4 @@ When the team settles a contract or design choice (API shape, schema, library, n
 
 - The owner table above is the source of truth for agents. `.github/CODEOWNERS` is the same thing for GitHub, which uses it to request reviews.
 - Change ownership only through the team lead, and update both places in one PR.
-<!-- team-board:end -->
+<!-- handoffboard:end -->

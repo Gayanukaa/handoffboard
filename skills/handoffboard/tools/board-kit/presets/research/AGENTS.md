@@ -1,4 +1,4 @@
-<!-- team-board:start -->
+<!-- handoffboard:start -->
 # Team rules for every agent
 
 ## FILL THIS IN
@@ -86,4 +86,4 @@ Every claim the team might state in a paper, talk or README gets an entry in `do
 - Say so on the board when you deviate from the plan, and put the deviation in the log.
 - Credit every dataset, model, paper and code you build on, with a source and licence.
 - Don't invent references. Check that each citation exists and says what you claim before you add it.
-<!-- team-board:end -->
+<!-- handoffboard:end -->

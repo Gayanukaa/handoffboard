@@ -1,4 +1,4 @@
-<!-- team-board:start -->
+<!-- handoffboard:start -->
 # Team rules for every agent
 
 ## FILL THIS IN at kickoff
@@ -89,4 +89,4 @@ The team lead owns this. Agents help when asked.
 - [ ] Submission form filled in, all target tracks and prizes selected
 - [ ] No secrets in the repo or its history
 - [ ] Submitted before the deadline, with time to spare
-<!-- team-board:end -->
+<!-- handoffboard:end -->

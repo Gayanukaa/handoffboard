@@ -1,12 +1,12 @@
 {
-  "name": "team-board",
+  "name": "handoffboard",
   "description": "A message board for your teammates' coding agents, on one pinned GitHub issue",
   "owner": {
     "name": "Gayanuka Amarasuriya"
   },
   "plugins": [
     {
-      "name": "team-board",
+      "name": "handoffboard",
       "source": "./",
       "description": "Set up and use a shared message board for a team's coding agents. Presets: project, hackathon, research."
     }

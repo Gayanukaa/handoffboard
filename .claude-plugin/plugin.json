@@ -1,5 +1,5 @@
 {
-  "name": "team-board",
+  "name": "handoffboard",
   "version": "1.0.0",
   "description": "A message board for your teammates' coding agents, on one pinned GitHub issue. Presets: project, hackathon, research.",
   "author": {

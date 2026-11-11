@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Team board: a message board for your teammates' coding agents, on a pinned GitHub issue.
+# Handoffboard: a message board for your teammates' coding agents, on a pinned GitHub issue.
 # Needs bash and the GitHub CLI (gh), logged in. Runs on Linux, macOS, and Windows (Git Bash).
 # From PowerShell or cmd on Windows, use tools\board.cmd with the same arguments.
 # Settings live in tools/board.conf. An environment variable with the same name overrides one, for you only.
@@ -13,8 +13,8 @@ KIT="$SCRIPT_DIR/board-kit"
 COMMON="$KIT/common"
 PRESETS="$KIT/presets"
 STATE_DIR="$ROOT/.board"
-AGENTS_MARK='<!-- team-board:start -->'
-GA_MARK='# team-board:'
+AGENTS_MARK='<!-- handoffboard:start -->'
+GA_MARK='# handoffboard:'
 HOOK_MARK='tools/board\" hook'
 
 die()  { echo "board: $*" >&2; exit 1; }
@@ -435,11 +435,11 @@ hook_session_start() {
   local out
   HOOK_ERR=""
   if ! hook_resolve; then
-    echo "Team board: not reachable ($HOOK_ERR)."
+    echo "Handoffboard: not reachable ($HOOK_ERR)."
     echo "Tell your human. Fix with: bash tools/board doctor (or bash tools/board init if the board was never set up)."
     return 0
   fi
-  echo "Team board: GitHub issue $REPO#$ISSUE (https://github.com/$REPO/issues/$ISSUE). Rules are in AGENTS.md."
+  echo "Handoffboard: GitHub issue $REPO#$ISSUE (https://github.com/$REPO/issues/$ISSUE). Rules are in AGENTS.md."
   if out="$(do_unread all 2>&1)"; then
     if [ -n "$out" ]; then echo "Unread posts:"; echo "$out"; else echo "No unread posts."; fi
   else
@@ -498,7 +498,7 @@ create_board_issue() {
   printf '%s\n' "$n"
 }
 
-ensure_label() { gh label create "$LABEL" --repo "$REPO" --color 5319E7 --description "Team board: messages between teammates' agents (tools/board)" --force >/dev/null 2>&1; }
+ensure_label() { gh label create "$LABEL" --repo "$REPO" --color 5319E7 --description "Handoffboard: messages between teammates' agents (tools/board)" --force >/dev/null 2>&1; }
 pin_issue()    { gh issue pin "$1" --repo "$REPO" >/dev/null 2>&1; }
 
 # True if file $1 contains a CR. (grep -q $'\r' never matches in Git Bash on Windows, so use tr.)
@@ -540,7 +540,7 @@ merge_gitattributes() {
   fi
   [ -s .gitattributes ] && [ -n "$(tail -c 1 .gitattributes)" ] && echo >> .gitattributes
   cat >> .gitattributes <<'GA'
-# team-board: keep the board script runnable on Windows, macOS and Linux
+# handoffboard: keep the board script runnable on Windows, macOS and Linux
 tools/board text eol=lf
 tools/board.conf text eol=lf
 tools/board-kit/** text eol=lf
@@ -683,7 +683,7 @@ cmd_init() {
   [ -z "$(git rev-parse --show-prefix 2>/dev/null)" ] \
     || die "tools/ must sit at the repo root ($(git rev-parse --show-toplevel)). Move the tools/ folder there and rerun."
 
-  echo "Setting up the team board in $ROOT (preset: $PRESET)"
+  echo "Setting up handoffboard in $ROOT (preset: $PRESET)"
   echo "Files (nothing that already exists is overwritten):"
   setup_repo   # fail early, before any file is written, if there is no GitHub remote
   normalize_kit
@@ -744,7 +744,7 @@ cmd_doctor() {
   note() { echo "  warn  $*"; }
 
   cd "$ROOT" || die "cannot open $ROOT"
-  echo "Team board check ($ROOT)"
+  echo "Handoffboard check ($ROOT)"
   ok "bash $BASH_VERSION"
   if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     if [ -z "$(git rev-parse --show-prefix 2>/dev/null)" ]; then ok "tools/ is at the repo root"; else bad "tools/ is not at the repo root; move it to $(git rev-parse --show-toplevel)"; fi
