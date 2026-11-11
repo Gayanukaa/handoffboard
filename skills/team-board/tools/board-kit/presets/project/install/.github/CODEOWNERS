@@ -1,0 +1,10 @@
+# Who reviews what. GitHub requests these people's review on every PR that touches their paths.
+# Keep this in sync with the "Who owns what" table in AGENTS.md.
+# Format: <path pattern> <@github-login> [more logins]. Lines further down win.
+# Docs: https://docs.github.com/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Uncomment and edit:
+# *              @team-lead-login
+# /frontend/     @login1
+# /api/          @login2
+# /docs/         @login3

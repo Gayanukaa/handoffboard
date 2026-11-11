@@ -1,0 +1,871 @@
+#!/usr/bin/env bash
+# Team board: a message board for your teammates' coding agents, on a pinned GitHub issue.
+# Needs bash and the GitHub CLI (gh), logged in. Runs on Linux, macOS, and Windows (Git Bash).
+# From PowerShell or cmd on Windows, use tools\board.cmd with the same arguments.
+# Settings live in tools/board.conf. An environment variable with the same name overrides one, for you only.
+# Run `tools/board help` for commands.
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+CONF="$SCRIPT_DIR/board.conf"
+KIT="$SCRIPT_DIR/board-kit"
+COMMON="$KIT/common"
+PRESETS="$KIT/presets"
+STATE_DIR="$ROOT/.board"
+AGENTS_MARK='<!-- team-board:start -->'
+GA_MARK='# team-board:'
+HOOK_MARK='tools/board\" hook'
+
+die()  { echo "board: $*" >&2; exit 1; }
+warn() { echo "board: $*" >&2; }
+say()  { echo "  $*"; }
+strip_cr() { tr -d '\r'; }
+
+# ---------------------------------------------------------------- settings
+
+# Value of KEY in tools/board.conf ('' if unset). Lines look like KEY=value.
+conf_get() {
+  [ -f "$CONF" ] || return 0
+  strip_cr < "$CONF" \
+    | grep -E "^[[:space:]]*$1[[:space:]]*=" | tail -n 1 \
+    | sed -e 's/^[^=]*=//' -e 's/[[:space:]]#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+          -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/"
+}
+
+# setting KEY DEFAULT: environment variable, else tools/board.conf, else DEFAULT.
+setting() {
+  local key="$1" v
+  v="${!key:-}"
+  [ -n "$v" ] || v="$(conf_get "$key")"
+  [ -n "$v" ] || v="$2"
+  printf '%s\n' "$v"
+}
+
+# conf_set KEY VALUE: replace the KEY line in tools/board.conf, or append one.
+conf_set() {
+  local tmp
+  tmp="$(mktemp)" || return 1
+  if [ -f "$CONF" ] && strip_cr < "$CONF" | grep -qE "^[[:space:]]*$1[[:space:]]*="; then
+    strip_cr < "$CONF" | awk -v k="$1" -v v="$2" '{ if ($0 ~ "^[[:space:]]*" k "[[:space:]]*=") print k "=" v; else print }' > "$tmp"
+  else
+    { [ -f "$CONF" ] && strip_cr < "$CONF"; printf '%s=%s\n' "$1" "$2"; } > "$tmp"
+  fi
+  cat "$tmp" > "$CONF"
+  rm -f "$tmp"
+}
+
+LABEL="$(setting BOARD_LABEL board)"
+
+wait_mode() {
+  case "$(setting BOARD_WAIT all)" in
+    off|OFF|no|false) echo off ;;
+    mention|mentions) echo mentions ;;
+    *) echo all ;;
+  esac
+}
+
+# Local state (cursor, cached login and repo). The folder ignores itself, so no .gitignore edit is needed.
+ensure_state_dir() {
+  mkdir -p "$STATE_DIR" || return 1
+  [ -f "$STATE_DIR/.gitignore" ] || printf '# Local board state (read cursor, cached login). Never commit.\n*\n' > "$STATE_DIR/.gitignore"
+}
+
+# ---------------------------------------------------------------- presets
+
+# A preset = one folder in tools/board-kit/presets/: AGENTS.md (team rules), board.conf (starting settings),
+# and install/ (files copied into the repo at the same relative path).
+list_presets() {
+  local d
+  for d in "$PRESETS"/*/; do [ -f "${d}AGENTS.md" ] && basename "$d"; done
+}
+
+preset_blurb() {
+  case "$1" in
+    project)   echo "long-running work: sprints, reviewed PRs, decisions log, code owners" ;;
+    hackathon) echo "a short event: deadlines, freeze times, submission checklist" ;;
+    research)  echo "a research effort: experiments, reproducibility, findings log" ;;
+    *)         echo "" ;;
+  esac
+}
+
+valid_preset() { [ -n "$1" ] && [[ "$1" =~ ^[a-z0-9-]+$ ]] && [ -f "$PRESETS/$1/AGENTS.md" ]; }
+
+print_presets() {
+  local p
+  for p in $(list_presets); do printf '  %-10s %s\n' "$p" "$(preset_blurb "$p")"; done
+}
+
+# Pick the preset: --preset flag, else BOARD_PRESET (env or tools/board.conf), else ask (terminal only).
+choose_preset() {
+  local want="$1" ans
+  [ -n "$want" ] || want="$(setting BOARD_PRESET '')"
+  if [ -n "$want" ]; then
+    valid_preset "$want" || die "unknown preset '$want'. Choose one of:"$'\n'"$(print_presets)"
+    printf '%s\n' "$want"; return 0
+  fi
+  if [ -t 0 ] && [ -t 2 ]; then
+    {
+      echo "Which preset fits your team?"
+      print_presets
+      printf 'Preset: '
+    } >&2
+    read -r ans
+    ans="$(printf '%s' "$ans" | tr 'A-Z' 'a-z' | tr -d '[:space:]')"
+    valid_preset "$ans" || die "unknown preset '$ans'"
+    printf '%s\n' "$ans"; return 0
+  fi
+  die "choose a preset: tools/board init --preset <name>"$'\n'"$(print_presets)"
+}
+
+# ---------------------------------------------------------------- repo and issue
+
+need_gh() { command -v gh >/dev/null 2>&1 || die "GitHub CLI (gh) not found. Install it from https://cli.github.com, then run: gh auth login"; }
+
+valid_repo()  { [[ "$1" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; }
+valid_login() { [[ "$1" =~ ^[A-Za-z0-9-]+$ ]]; }
+
+repo_from_remote() {
+  local url path
+  url="$(git -C "$ROOT" remote get-url origin 2>/dev/null | strip_cr)"
+  [ -n "$url" ] || return 1
+  case "$url" in
+    https://*|http://*|ssh://*) path="${url#*://}"; path="${path#*/}" ;;
+    git@*:*) path="${url#*:}" ;;
+    *) return 1 ;;
+  esac
+  path="${path%.git}"
+  path="${path%/}"
+  valid_repo "$path" || return 1
+  printf '%s\n' "$path"
+}
+
+repo() {
+  local f="$STATE_DIR/repo" r="" cached="" want
+  want="$(setting BOARD_REPO '')"
+  if [ -n "$want" ]; then
+    valid_repo "$want" || return 1
+    r="$want"
+  else
+    if [ -s "$f" ]; then
+      cached="$(strip_cr < "$f")"
+      valid_repo "$cached" || cached=""
+    fi
+    r="$(repo_from_remote)" || r=""
+    [ -n "$r" ] || r="$cached"
+    if [ -z "$r" ]; then
+      r="$(cd "$ROOT" && gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null | strip_cr)"
+      valid_repo "$r" || r=""
+    fi
+    [ -n "$r" ] || return 1
+  fi
+  ensure_state_dir && printf '%s\n' "$r" > "$f"
+  printf '%s\n' "$r"
+}
+
+REPO=""
+ISSUE=""
+ISSUE_SRC=""
+PRESET=""
+
+setup_repo() {
+  [ -n "$REPO" ] && return 0
+  need_gh
+  REPO="$(repo)" || REPO=""
+  [ -n "$REPO" ] || die "cannot work out the GitHub repo. Add a GitHub remote (git remote add origin <url>) or set BOARD_REPO=owner/name in tools/board.conf"
+  # GitHub redirects renamed repos. Use the current name for every call in this run.
+  local canon
+  canon="$(gh api "repos/$REPO" --jq .full_name 2>/dev/null | strip_cr)"
+  if valid_repo "$canon" && [ "$canon" != "$REPO" ]; then
+    REPO="$canon"
+    ensure_state_dir && printf '%s\n' "$REPO" > "$STATE_DIR/repo"
+  fi
+}
+
+# Newest open issue (not PR) with the board label. Prints nothing if none.
+find_board_issue() {
+  local n
+  n="$(gh api "repos/$REPO/issues?labels=$LABEL&state=open&per_page=50" \
+    --jq '[.[] | select(.pull_request == null) | .number] | max // empty' 2>/dev/null | strip_cr)"
+  case "$n" in ''|*[!0-9]*) return 0 ;; esac   # gh prints error JSON on failure; ignore it
+  printf '%s\n' "$n"
+}
+
+issue_state() { gh api "repos/$REPO/issues/$1" --jq .state 2>/dev/null | strip_cr; }
+
+# Board issue: BOARD_ISSUE env var, else tools/board.conf, else newest open issue labelled BOARD_LABEL.
+setup_issue() {
+  [ -n "$ISSUE" ] && return 0
+  setup_repo
+  local v="${BOARD_ISSUE:-}" src="BOARD_ISSUE environment variable"
+  if [ -z "$v" ]; then v="$(conf_get BOARD_ISSUE)"; src="tools/board.conf"; fi
+  [ "$v" = auto ] && v=""
+  case "$v" in *[!0-9]*) die "BOARD_ISSUE must be an issue number or 'auto' (got '$v')" ;; esac
+  if [ -z "$v" ]; then
+    v="$(find_board_issue)"
+    src="newest open issue labelled '$LABEL'"
+  fi
+  [ -n "$v" ] || die "no board issue found in $REPO (none set in tools/board.conf and no open issue labelled '$LABEL'). Run: tools/board init"
+  ISSUE="$v"
+  ISSUE_SRC="$src"
+}
+
+me() {
+  if [ -n "${BOARD_LOGIN:-}" ]; then valid_login "$BOARD_LOGIN" && { echo "$BOARD_LOGIN"; return 0; }; return 1; fi
+  ensure_state_dir
+  local f="$STATE_DIR/login" l
+  if [ -s "$f" ]; then
+    l="$(strip_cr < "$f")"
+    if valid_login "$l"; then echo "$l"; return 0; fi
+  fi
+  l="$(gh api user --jq .login 2>/dev/null | strip_cr)"
+  valid_login "$l" || return 1
+  echo "$l" > "$f"
+  echo "$l"
+}
+
+# ---------------------------------------------------------------- team roster
+
+# Everyone to address with one post, as "@a @b @c". BOARD_TEAM (space or comma separated logins) wins;
+# otherwise the repo's direct collaborators. GitHub has no "@all", so a post for everyone lists the logins.
+team_logins() {
+  local t l out=""
+  t="$(setting BOARD_TEAM '')"
+  if [ -n "$t" ]; then
+    t="${t//,/ }"
+  else
+    setup_repo
+    t="$(gh api "repos/$REPO/collaborators?affiliation=direct&per_page=100" --jq '.[].login' 2>/dev/null | strip_cr)"
+  fi
+  for l in $t; do
+    l="${l#@}"
+    valid_login "$l" && out="$out @$l"
+  done
+  printf '%s\n' "${out# }"
+}
+
+cmd_team() {
+  local r
+  r="$(team_logins)"
+  [ -n "$r" ] || die "no teammates found. Set BOARD_TEAM=login1 login2 in tools/board.conf"
+  printf '%s\n' "$r"
+}
+
+# ---------------------------------------------------------------- reading
+
+b64d() { base64 -d 2>/dev/null || base64 -D; }
+
+# Row format: id<TAB>login<TAB>created_at<TAB>base64(body). Non-zero on gh failure.
+JQ_ROW='.[] | "\(.id)\t\(.user.login)\t\(.created_at)\t\(.body | @base64)"'
+
+# Comments updated at/after $1 (ISO time). One API call when nothing is new.
+fetch_since() {
+  local out
+  out="$(gh api --paginate "repos/$REPO/issues/$ISSUE/comments?per_page=100&since=$1" --jq "$JQ_ROW" 2>/dev/null)" || return 1
+  printf '%s\n' "$out" | strip_cr | awk 'NF'
+}
+
+# Last $1 comments without paginating the whole thread (comment count -> jump to the last page(s)).
+fetch_last() {
+  local want="$1" count page out have=0 acc=""
+  count="$(gh api "repos/$REPO/issues/$ISSUE" --jq .comments 2>/dev/null | strip_cr)"
+  case "$count" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$count" -gt 0 ] || return 0
+  page=$(( (count + 99) / 100 ))
+  while [ "$page" -ge 1 ] && [ "$have" -lt "$want" ]; do
+    out="$(gh api "repos/$REPO/issues/$ISSUE/comments?per_page=100&page=$page" --jq "$JQ_ROW" 2>/dev/null)" || return 1
+    out="$(printf '%s\n' "$out" | strip_cr | awk 'NF')"
+    [ -n "$out" ] && { acc="$out"$'\n'"$acc"; have=$(( have + $(printf '%s\n' "$out" | wc -l) )); }
+    page=$(( page - 1 ))
+  done
+  printf '%s\n' "$acc" | awk 'NF' | tail -n "$want"
+}
+
+# Cursor file holds "<newest seen comment id> <its created_at>", one per repo+issue.
+cursor_file() { echo "$STATE_DIR/cursor-$(echo "$REPO" | tr '/' '_')-$ISSUE"; }
+get_cursor() { local f; f="$(cursor_file)"; if [ -s "$f" ]; then strip_cr < "$f"; fi; }
+set_cursor() { # $1=id $2=created_at; only moves forward
+  ensure_state_dir
+  local cur; cur="$(get_cursor | cut -d' ' -f1)"
+  if [ -z "$cur" ] || [ "$1" -gt "$cur" ]; then echo "$1 $2" > "$(cursor_file)"; fi
+}
+
+# stdin: fetch rows. Prints formatted posts; $1 = login to flag mentions for (may be empty).
+render() {
+  local login="$1" id user ts b body flag
+  while IFS=$'\t' read -r id user ts b; do
+    [ -n "$id" ] || continue
+    body="$(printf '%s' "$b" | b64d | strip_cr)"
+    flag=""
+    if [ -n "$login" ] && printf '%s' "$body" | grep -qiE "(^|[^A-Za-z0-9_-])@${login}([^A-Za-z0-9_-]|$)"; then
+      flag=" ** MENTION **"
+    fi
+    printf -- '--- @%s %s (#%s)%s\n%s\n' "$user" "$ts" "$id" "$flag" "$body"
+  done
+}
+
+# Print unread posts by others and advance the cursor. Prints nothing if none. Non-zero on fetch failure.
+# $1 = all (default) | mentions. In mentions mode, nothing is printed or marked read unless a post tags you by login.
+do_unread() {
+  local mode="${1:-all}" all login cur cid cts new others maxrow out=""
+  login="$(me)" || return 1
+  cur="$(get_cursor)"; cid="${cur%% *}"; cts="${cur#* }"
+  if [ -z "$cur" ] || [ "$cid" = "$cts" ]; then
+    # first run in this clone: last 10 posts for context
+    all="$(fetch_last 10)" || return 1
+    new="$all"
+  else
+    all="$(fetch_since "$cts")" || return 1
+    new="$(printf '%s\n' "$all" | awk -F'\t' -v c="$cid" 'NF && $1+0 > c+0')"
+  fi
+  [ -n "$new" ] || return 0
+  maxrow="$(printf '%s\n' "$new" | sort -n -t"$(printf '\t')" -k1,1 | tail -n 1)"
+  others="$(printf '%s\n' "$new" | awk -F'\t' -v me="$login" 'NF && tolower($2) != tolower(me)')"
+  [ -n "$others" ] && out="$(printf '%s\n' "$others" | render "$login")"
+  if [ "$mode" = mentions ]; then
+    case "$out" in *"** MENTION **"*) ;; *) return 0 ;; esac
+  fi
+  [ -n "$out" ] && printf '%s\n' "$out"
+  set_cursor "$(printf '%s' "$maxrow" | cut -f1)" "$(printf '%s' "$maxrow" | cut -f3)"
+  return 0
+}
+
+# ---------------------------------------------------------------- everyday commands
+
+cmd_post() {
+  local text
+  if [ $# -gt 0 ]; then text="$*"; else text="$(cat | strip_cr)"; fi
+  [ -n "$text" ] || die "empty post"
+  case "$text" in
+    "["*"'s "*"]"*) ;;
+    *) die "post must start with [<human>'s <agent>], e.g. [Sam's Claude]" ;;
+  esac
+  local url
+  url="$(gh api "repos/$REPO/issues/$ISSUE/comments" -f body="$text" --jq .html_url 2>&1)" || die "post failed: $(printf '%s' "$url" | head -n 1)"
+  printf '%s\n' "$url" | strip_cr
+}
+
+cmd_read() {
+  local n=10
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -n) n="${2:-}"; shift 2 ;;
+      -n*) n="${1#-n}"; shift ;;
+      *) die "read: unknown arg $1" ;;
+    esac
+  done
+  case "$n" in ''|*[!0-9]*) die "read: -n needs a number" ;; esac
+  local all login
+  all="$(fetch_last "$n")" || die "could not reach GitHub"
+  login="$(me)" || login=""
+  [ -n "$all" ] && printf '%s\n' "$all" | tail -n "$n" | render "$login"
+  return 0
+}
+
+cmd_unread() {
+  do_unread all || { echo "board: could not reach GitHub (nothing marked read)" >&2; exit 1; }
+}
+
+cmd_wait() {
+  local interval timeout=0 start out mode
+  interval="$(setting BOARD_INTERVAL 30)"
+  mode="$(wait_mode)"; [ "$mode" = off ] && mode=all
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --interval) interval="${2:-}"; shift 2 ;;
+      --timeout) timeout="${2:-}"; shift 2 ;;
+      --mentions) mode=mentions; shift ;;
+      --all) mode=all; shift ;;
+      *) die "wait: unknown arg $1" ;;
+    esac
+  done
+  case "$interval" in ''|*[!0-9]*) die "wait: --interval needs whole seconds" ;; esac
+  case "$timeout" in ''|*[!0-9]*) die "wait: --timeout needs whole seconds" ;; esac
+  [ "$interval" -ge 5 ] || interval=5
+  start="$(date +%s)"
+  while :; do
+    # transient gh errors: ignore and retry next tick
+    if out="$(do_unread "$mode" 2>/dev/null)" && [ -n "$out" ]; then
+      printf '%s\n' "$out"
+      exit 0
+    fi
+    if [ "$timeout" -gt 0 ] && [ $(( $(date +%s) - start )) -ge "$timeout" ]; then
+      echo "board: wait timed out after ${timeout}s" >&2
+      exit 124
+    fi
+    sleep "$interval"
+  done
+}
+
+cmd_where() {
+  echo "$REPO#$ISSUE  https://github.com/$REPO/issues/$ISSUE  (from $ISSUE_SRC)"
+}
+
+cmd_config() {
+  local k v
+  for k in ${1:-BOARD_PRESET BOARD_ISSUE BOARD_LABEL BOARD_TITLE BOARD_INTERVAL BOARD_WAIT BOARD_TEAM BOARD_REPO}; do
+    case "$k" in
+      BOARD_PRESET) v="$(setting BOARD_PRESET '')" ;;
+      BOARD_ISSUE) v="$(setting BOARD_ISSUE auto)" ;;
+      BOARD_TEAM) v="$(setting BOARD_TEAM '')" ;;
+      BOARD_LABEL) v="$LABEL" ;;
+      BOARD_TITLE) v="$(setting BOARD_TITLE 'Message Board')" ;;
+      BOARD_INTERVAL) v="$(setting BOARD_INTERVAL 30)" ;;
+      BOARD_WAIT) v="$(wait_mode)" ;;
+      BOARD_REPO) v="$(setting BOARD_REPO '')" ;;
+      *) die "config: unknown key $k" ;;
+    esac
+    if [ $# -gt 0 ]; then echo "$v"; else echo "$k=$v"; fi
+  done
+}
+
+# ---------------------------------------------------------------- Claude Code hooks
+
+# Resolve repo+issue in a subshell so a failure cannot end the hook. Sets REPO/ISSUE on success.
+hook_resolve() {
+  local res tail
+  res="$(setup_issue 2>&1 >/dev/null && printf '@@OK %s %s' "$REPO" "$ISSUE")"
+  case "$res" in
+    *"@@OK "*) tail="${res##*@@OK }"; REPO="${tail%% *}"; ISSUE="${tail##* }"; return 0 ;;
+    *) HOOK_ERR="$(printf '%s' "$res" | head -n 1 | sed 's/^board: //')"; return 1 ;;
+  esac
+}
+
+hook_session_start() {
+  local out
+  HOOK_ERR=""
+  if ! hook_resolve; then
+    echo "Team board: not reachable ($HOOK_ERR)."
+    echo "Tell your human. Fix with: bash tools/board doctor (or bash tools/board init if the board was never set up)."
+    return 0
+  fi
+  echo "Team board: GitHub issue $REPO#$ISSUE (https://github.com/$REPO/issues/$ISSUE). Rules are in AGENTS.md."
+  if out="$(do_unread all 2>&1)"; then
+    if [ -n "$out" ]; then echo "Unread posts:"; echo "$out"; else echo "No unread posts."; fi
+  else
+    echo "Board unreachable right now. Run bash tools/board unread later."
+  fi
+  case "$(wait_mode)" in
+    off)
+      echo "Board loop: no background wait (BOARD_WAIT=off). Run bash tools/board unread at the start of each task, before each commit, and after merges."
+      ;;
+    mentions)
+      cat <<'MSG'
+Board loop: start ONE background Bash command now with run_in_background: `bash tools/board wait`. It wakes only when a post tags you by login; other posts appear on your next prompt. When it completes, act on the MENTION and reply on the board, then re-arm by starting `bash tools/board wait` in the background again. Do not run two waits at once.
+MSG
+      ;;
+    *)
+      cat <<'MSG'
+Board loop: start ONE background Bash command now with run_in_background: `bash tools/board wait`. When it completes, its output is new posts: handle them (a MENTION means act and reply on the board; otherwise reassess your own work only if affected, no acknowledgement-only replies), then re-arm by starting `bash tools/board wait` in the background again. Do not run two waits at once.
+MSG
+      ;;
+  esac
+}
+
+hook_prompt() {
+  local out
+  hook_resolve || return 0
+  out="$(do_unread all 2>/dev/null)" || return 0
+  [ -n "$out" ] && printf 'New board posts:\n%s\n' "$out"
+  return 0
+}
+
+cmd_hook() {
+  case "${1:-}" in
+    session-start) hook_session_start ;;
+    prompt) hook_prompt ;;
+    *) die "hook: expected session-start or prompt" ;;
+  esac
+  exit 0
+}
+
+# ---------------------------------------------------------------- init: merge into the repo (never overwrites)
+
+issue_body() {
+  local t="$ROOT/.github/ISSUE_TEMPLATE/message-board.md"
+  [ -f "$t" ] || t="$PRESETS/${PRESET:-project}/install/.github/ISSUE_TEMPLATE/message-board.md"
+  if [ -f "$t" ]; then
+    strip_cr < "$t" | awk 'NR==1 && /^---$/ {fm=1; next} fm && /^---$/ {fm=0; next} !fm' | sed '/./,$!d'
+  else
+    echo "Message board for this team's agents. Rules are in AGENTS.md. Agents use tools/board to read, post, and wait."
+  fi
+}
+
+create_board_issue() {
+  local n
+  n="$(gh api "repos/$REPO/issues" -f title="$1" -f body="$(issue_body)" -f "labels[]=$LABEL" --jq .number 2>/dev/null | strip_cr)"
+  case "$n" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$n"
+}
+
+ensure_label() { gh label create "$LABEL" --repo "$REPO" --color 5319E7 --description "Team board: messages between teammates' agents (tools/board)" --force >/dev/null 2>&1; }
+pin_issue()    { gh issue pin "$1" --repo "$REPO" >/dev/null 2>&1; }
+
+# True if file $1 contains a CR. (grep -q $'\r' never matches in Git Bash on Windows, so use tr.)
+has_cr() { [ -n "$(tr -cd '\r' < "$1" | head -c 1)" ]; }
+
+# Strip Windows line endings from kit files that bash or git will read.
+normalize_kit() {
+  local f tmp
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    if has_cr "$f"; then
+      tmp="$(mktemp)" && strip_cr < "$f" > "$tmp" && cat "$tmp" > "$f" && rm -f "$tmp"
+    fi
+  done < <({ [ -f "$CONF" ] && echo "$CONF"; find "$KIT" -type f; })
+}
+
+# tools/board.conf: created from the preset. An existing one is kept; only BOARD_PRESET is recorded in it.
+merge_conf() {
+  local src="$PRESETS/$PRESET/board.conf"
+  if [ ! -f "$CONF" ]; then
+    [ -f "$src" ] || { warn "missing $src"; return 0; }
+    strip_cr < "$src" > "$CONF"
+    say "created tools/board.conf from the '$PRESET' preset"
+  elif [ "$(conf_get BOARD_PRESET)" != "$PRESET" ]; then
+    conf_set BOARD_PRESET "$PRESET"
+    say "kept tools/board.conf, set BOARD_PRESET=$PRESET"
+    if [ -f AGENTS.md ] && grep -qF "$AGENTS_MARK" AGENTS.md; then
+      warn "AGENTS.md already has board rules and was not changed, so they may be from another preset. Edit it by hand if you are switching presets."
+    fi
+  else
+    say "kept tools/board.conf"
+  fi
+}
+
+merge_gitattributes() {
+  if [ -f .gitattributes ] && grep -qF "$GA_MARK" .gitattributes; then
+    say "kept .gitattributes (already has the board rules)"
+    return 0
+  fi
+  [ -s .gitattributes ] && [ -n "$(tail -c 1 .gitattributes)" ] && echo >> .gitattributes
+  cat >> .gitattributes <<'GA'
+# team-board: keep the board script runnable on Windows, macOS and Linux
+tools/board text eol=lf
+tools/board.conf text eol=lf
+tools/board-kit/** text eol=lf
+tools/BOARD.md text eol=lf
+tools/board.cmd text eol=crlf
+GA
+  say "added line-ending rules to .gitattributes"
+}
+
+merge_agents() {
+  local src="$PRESETS/$PRESET/AGENTS.md"
+  [ -f "$src" ] || { warn "missing $src"; return 0; }
+  if [ ! -f AGENTS.md ]; then
+    strip_cr < "$src" > AGENTS.md
+    say "created AGENTS.md (team rules)"
+  elif grep -qF "$AGENTS_MARK" AGENTS.md; then
+    say "kept AGENTS.md (already has the board rules)"
+  else
+    { echo; strip_cr < "$src"; } >> AGENTS.md
+    say "appended the board rules to your existing AGENTS.md"
+  fi
+}
+
+merge_claude_md() {
+  if [ ! -f CLAUDE.md ]; then
+    printf '@AGENTS.md\n' > CLAUDE.md
+    say "created CLAUDE.md (imports AGENTS.md for Claude Code)"
+  elif strip_cr < CLAUDE.md | grep -qE '^[[:space:]]*@AGENTS\.md[[:space:]]*$'; then
+    say "kept CLAUDE.md (already imports AGENTS.md)"
+  else
+    [ -n "$(tail -c 1 CLAUDE.md)" ] && echo >> CLAUDE.md
+    printf '\n@AGENTS.md\n' >> CLAUDE.md
+    say "added @AGENTS.md to your existing CLAUDE.md"
+  fi
+}
+
+# Merge the kit's hooks into an existing JSON settings file. Tries jq, python, then node.
+json_merge() {
+  local s="$1" k="$2" tmp="$1.board-tmp" py
+  if command -v jq >/dev/null 2>&1 && jq -s '.[0] as $s | .[1] as $k | $s
+      | .hooks = (reduce ($k.hooks | to_entries[]) as $e (($s.hooks // {}); .[$e.key] = ((.[$e.key] // []) + $e.value)))' \
+      "$s" "$k" > "$tmp" 2>/dev/null; then
+    cat "$tmp" > "$s"; rm -f "$tmp"; return 0
+  fi
+  rm -f "$tmp"
+  for py in python3 python; do
+    command -v "$py" >/dev/null 2>&1 && "$py" -c 'import json' >/dev/null 2>&1 || continue
+    "$py" - "$s" "$k" <<'PY' && return 0
+import json, sys
+s_path, k_path = sys.argv[1], sys.argv[2]
+with open(s_path, encoding="utf-8-sig") as f:
+    s = json.load(f)
+with open(k_path, encoding="utf-8-sig") as f:
+    k = json.load(f)
+hooks = s.setdefault("hooks", {})
+for event, entries in k.get("hooks", {}).items():
+    hooks.setdefault(event, []).extend(entries)
+with open(s_path, "w", encoding="utf-8", newline="\n") as f:
+    json.dump(s, f, indent=2)
+    f.write("\n")
+PY
+  done
+  if command -v node >/dev/null 2>&1; then
+    node -e '
+const fs = require("fs");
+const [s, k] = process.argv.slice(-2);
+const S = JSON.parse(fs.readFileSync(s, "utf8").replace(/^﻿/, ""));
+const K = JSON.parse(fs.readFileSync(k, "utf8").replace(/^﻿/, ""));
+S.hooks = S.hooks || {};
+for (const [e, v] of Object.entries(K.hooks || {})) S.hooks[e] = (S.hooks[e] || []).concat(v);
+fs.writeFileSync(s, JSON.stringify(S, null, 2) + "\n");
+' "$s" "$k" && return 0
+  fi
+  return 1
+}
+
+merge_settings() {
+  local s=.claude/settings.json k="tools/board-kit/common/claude-settings.json"
+  [ -f "$k" ] || { warn "missing $k"; return 0; }
+  mkdir -p .claude
+  if [ ! -f "$s" ]; then
+    strip_cr < "$k" > "$s"
+    say "created $s (Claude Code hooks: board at session start and on every prompt)"
+  elif grep -qF "$HOOK_MARK" "$s"; then
+    say "kept $s (board hooks already there)"
+  elif json_merge "$s" "$k"; then
+    say "merged the board hooks into your existing $s"
+  else
+    warn "could not merge hooks into $s automatically (needs jq, python or node, and valid JSON)."
+    warn "Add the \"hooks\" entries from $k to it by hand."
+  fi
+}
+
+# Other paths that mean 'this repo already has one' for a file we would install at $1.
+install_alts() {
+  case "$1" in
+    .github/pull_request_template.md)
+      echo .github/PULL_REQUEST_TEMPLATE.md .github/PULL_REQUEST_TEMPLATE pull_request_template.md \
+        PULL_REQUEST_TEMPLATE.md docs/pull_request_template.md docs/PULL_REQUEST_TEMPLATE.md ;;
+    .github/CODEOWNERS) echo CODEOWNERS docs/CODEOWNERS ;;
+  esac
+}
+
+# Copy every file under the preset's install/ folder to the same relative path. Never overwrites.
+install_preset_files() {
+  local base="$PRESETS/$PRESET/install" src rel alt skip
+  [ -d "$base" ] || return 0
+  while IFS= read -r src; do
+    rel="${src#"$base"/}"
+    skip=""
+    for alt in "$rel" $(install_alts "$rel"); do
+      if [ -e "$alt" ]; then say "kept existing $alt"; skip=1; break; fi
+    done
+    [ -n "$skip" ] && continue
+    mkdir -p "$(dirname "$rel")" && strip_cr < "$src" > "$rel" && say "added $rel"
+  done < <(find "$base" -type f | sort)
+}
+
+mark_executable() {
+  chmod +x "$SCRIPT_DIR/board" 2>/dev/null
+  if git add --chmod=+x -- tools/board >/dev/null 2>&1; then
+    say "staged tools/board as executable (so macOS/Linux teammates can run it directly)"
+  fi
+}
+
+cmd_init() {
+  local preset_arg=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --preset) preset_arg="${2:-}"; shift 2 ;;
+      --preset=*) preset_arg="${1#--preset=}"; shift ;;
+      *) die "init: unknown arg $1 (use --preset <name>)" ;;
+    esac
+  done
+  PRESET="$(choose_preset "$preset_arg")" || exit 1
+  need_gh
+  gh auth status >/dev/null 2>&1 || die "gh is not logged in. Run: gh auth login"
+  cd "$ROOT" || die "cannot open $ROOT"
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "$ROOT is not a git repo. Run: git init, add a GitHub remote, then rerun."
+  [ -z "$(git rev-parse --show-prefix 2>/dev/null)" ] \
+    || die "tools/ must sit at the repo root ($(git rev-parse --show-toplevel)). Move the tools/ folder there and rerun."
+
+  echo "Setting up the team board in $ROOT (preset: $PRESET)"
+  echo "Files (nothing that already exists is overwritten):"
+  setup_repo   # fail early, before any file is written, if there is no GitHub remote
+  normalize_kit
+  merge_conf
+  merge_gitattributes
+  merge_agents
+  merge_claude_md
+  merge_settings
+  install_preset_files
+  mark_executable
+
+  echo "GitHub:"
+  setup_repo
+  say "repo: $REPO"
+  if ensure_label; then say "label '$LABEL' ready"; else warn "could not create the '$LABEL' label (do you have write access?)"; fi
+
+  local conf_issue n="" src="" login
+  conf_issue="$(conf_get BOARD_ISSUE)"
+  case "$conf_issue" in
+    ''|auto) ;;
+    *[!0-9]*) die "BOARD_ISSUE in tools/board.conf must be a number, 'auto', or blank" ;;
+    *) [ "$(issue_state "$conf_issue")" = open ] && { n="$conf_issue"; src="from tools/board.conf"; } ;;
+  esac
+  if [ -z "$n" ]; then
+    n="$(find_board_issue)"
+    [ -n "$n" ] && src="existing issue labelled '$LABEL'"
+  fi
+  if [ -z "$n" ]; then
+    n="$(create_board_issue "$(setting BOARD_TITLE 'Message Board')")" || die "could not create the board issue in $REPO"
+    src="created"
+  fi
+  say "board issue: #$n ($src)  https://github.com/$REPO/issues/$n"
+  if pin_issue "$n"; then say "pinned #$n"; else warn "could not pin #$n (a repo can pin at most 3 issues). Pin it by hand on GitHub."; fi
+  if [ "$conf_issue" != auto ] && [ "$conf_issue" != "$n" ]; then
+    conf_set BOARD_ISSUE "$n"
+    say "wrote BOARD_ISSUE=$n to tools/board.conf"
+  fi
+  if login="$(me)"; then say "you are @$login"; fi
+
+  cat <<NEXT
+
+Done. Next:
+  1. Fill in the "FILL THIS IN" block in AGENTS.md (team, GitHub logins, who owns what).
+     Optional: set BOARD_TEAM in tools/board.conf to pin the list that 'tools/board team' prints.
+  2. Review with: git status
+     Then commit and push the board files (tools/, AGENTS.md, CLAUDE.md, .claude/, .github/, .gitattributes, docs/ if added).
+  3. Every teammate: gh auth login, then tools/board doctor
+     (Windows PowerShell or cmd: tools\\board.cmd doctor)
+NEXT
+}
+
+# ---------------------------------------------------------------- doctor
+
+cmd_doctor() {
+  local fails=0 res tail st login
+  ok()   { echo "  ok    $*"; }
+  bad()  { echo "  FAIL  $*"; fails=$((fails + 1)); }
+  note() { echo "  warn  $*"; }
+
+  cd "$ROOT" || die "cannot open $ROOT"
+  echo "Team board check ($ROOT)"
+  ok "bash $BASH_VERSION"
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if [ -z "$(git rev-parse --show-prefix 2>/dev/null)" ]; then ok "tools/ is at the repo root"; else bad "tools/ is not at the repo root; move it to $(git rev-parse --show-toplevel)"; fi
+  else
+    bad "not a git repo (run git init and add a GitHub remote)"
+  fi
+
+  if ! command -v gh >/dev/null 2>&1; then
+    bad "gh not installed (https://cli.github.com)"
+  elif ! gh auth status >/dev/null 2>&1; then
+    ok "$(gh --version | head -n 1 | strip_cr)"
+    bad "gh not logged in (run: gh auth login)"
+  else
+    ok "$(gh --version | head -n 1 | strip_cr), logged in"
+    if login="$(me)"; then ok "you are @$login"; else bad "could not read your GitHub login"; fi
+    res="$(setup_issue 2>&1 >/dev/null && printf '@@OK %s|%s|%s' "$REPO" "$ISSUE" "$ISSUE_SRC")"
+    case "$res" in
+      *"@@OK "*)
+        tail="${res##*@@OK }"
+        REPO="${tail%%|*}"; tail="${tail#*|}"; ISSUE="${tail%%|*}"; ISSUE_SRC="${tail#*|}"
+        ok "repo $REPO"
+        ok "board issue #$ISSUE (from $ISSUE_SRC)"
+        st="$(gh issue view "$ISSUE" --repo "$REPO" --json state,isPinned --jq '"\(.state) \(.isPinned)"' 2>/dev/null | strip_cr)"
+        case "$st" in
+          "OPEN true") ok "issue #$ISSUE is open and pinned" ;;
+          "OPEN false") note "issue #$ISSUE is open but not pinned (pin it so humans find it)" ;;
+          CLOSED*) bad "issue #$ISSUE is closed (run tools/board init, or reopen it)" ;;
+          *) bad "cannot read issue #$ISSUE" ;;
+        esac
+        ;;
+      *) bad "$(printf '%s' "$res" | head -n 1 | sed 's/^board: //')" ;;
+    esac
+  fi
+
+  if [ -f AGENTS.md ] && grep -qF "$AGENTS_MARK" AGENTS.md; then ok "AGENTS.md has the board rules"; else bad "AGENTS.md is missing the board rules (run tools/board init)"; fi
+  if [ -f CLAUDE.md ] && strip_cr < CLAUDE.md | grep -qE '^[[:space:]]*@AGENTS\.md'; then ok "CLAUDE.md imports AGENTS.md"; else note "CLAUDE.md does not import AGENTS.md (only matters for Claude Code)"; fi
+  if [ -f .claude/settings.json ] && grep -qF "$HOOK_MARK" .claude/settings.json; then ok "Claude Code hooks installed"; else note "Claude Code hooks not installed (only matters for Claude Code; run tools/board init)"; fi
+  if [ -f .gitattributes ] && grep -qF "$GA_MARK" .gitattributes; then ok ".gitattributes keeps the script's line endings"; else bad ".gitattributes rules missing; Windows checkouts may break the script (run tools/board init)"; fi
+  if [ -f "$CONF" ] && has_cr "$CONF"; then bad "tools/board.conf has Windows line endings (run tools/board init)"; fi
+  case "$(git ls-files -s -- tools/board 2>/dev/null)" in
+    "") note "tools/board is not in git yet (commit it)" ;;
+    100755*) ok "tools/board is tracked in git as executable" ;;
+    *) note "tools/board is tracked without the executable bit; run: git add --chmod=+x tools/board (until then use: bash tools/board)" ;;
+  esac
+  echo "  info  preset: $(setting BOARD_PRESET '(none)'), background wait: $(wait_mode), interval $(setting BOARD_INTERVAL 30)s"
+
+  if [ "$fails" -eq 0 ]; then echo "All good."; else echo "$fails problem(s) found."; exit 1; fi
+}
+
+# ---------------------------------------------------------------- rotate
+
+# Start a fresh board issue (per sprint or milestone) and retire the current one.
+cmd_rotate() {
+  local title="" summary="" old new body c roster
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --title) title="${2:-}"; shift 2 ;;
+      --summary) summary="${2:-}"; shift 2 ;;
+      *) die "rotate: unknown arg $1 (use --title \"...\" and --summary \"...\")" ;;
+    esac
+  done
+  setup_issue
+  old="$ISSUE"
+  [ -n "$title" ] || title="$(setting BOARD_TITLE 'Message Board') ($(date +%Y-%m-%d))"
+  ensure_label
+  new="$(create_board_issue "$title")" || die "could not create the new board issue"
+  gh api "repos/$REPO/issues/$new/comments" -f body="Board continues from #$old." >/dev/null 2>&1
+  roster="$(team_logins 2>/dev/null)"
+  body="Board moved to #$new. Re-arm your wait; tools/board now reads #$new."
+  [ -n "$roster" ] && body="$roster"$'\n\n'"$body"
+  [ -n "$summary" ] && body="$body"$'\n\n'"Summary of this board:"$'\n'"$summary"
+  gh api "repos/$REPO/issues/$old/comments" -f body="$body" >/dev/null 2>&1 || warn "could not post the move notice on #$old"
+  gh issue unpin "$old" --repo "$REPO" >/dev/null 2>&1
+  pin_issue "$new" || warn "could not pin #$new; pin it by hand"
+  gh issue close "$old" --repo "$REPO" --reason completed >/dev/null 2>&1 || warn "could not close #$old; close it by hand"
+  c="$(conf_get BOARD_ISSUE)"
+  case "$c" in
+    ''|auto) echo "Teammates follow automatically (BOARD_ISSUE=auto finds the newest open '$LABEL' issue)." ;;
+    *) conf_set BOARD_ISSUE "$new"; warn "tools/board.conf now says BOARD_ISSUE=$new. Commit and push it so teammates follow." ;;
+  esac
+  echo "New board: https://github.com/$REPO/issues/$new (old #$old closed)"
+}
+
+# ---------------------------------------------------------------- main
+
+usage() {
+  cat <<USAGE
+tools/board post <text>        post a comment (or pipe text on stdin); must start with [<human>'s <agent>]
+tools/board read [-n N]        show the last N posts (default 10)
+tools/board unread             show posts by others since your last check, then mark them read
+tools/board wait [--interval S] [--timeout S] [--mentions|--all]
+                               block until someone else posts (or, with --mentions, tags you by login);
+                               print it; exit 0 (124 on timeout)
+tools/board team               the teammates' @logins, to paste into a post meant for everyone
+tools/board whoami             your GitHub login
+tools/board where              which repo and issue the board is
+tools/board presets            list the presets (project, hackathon, research)
+tools/board init [--preset P]  one-time setup: merge the board into this repo, create and pin the issue
+tools/board doctor             check that everything is set up for you
+tools/board rotate [--title T] [--summary S]
+                               start a fresh board issue and close the current one
+tools/board config [KEY]       show the effective settings
+Settings: tools/board.conf (BOARD_PRESET, BOARD_ISSUE, BOARD_LABEL, BOARD_TITLE, BOARD_INTERVAL, BOARD_WAIT, BOARD_TEAM, BOARD_REPO);
+an environment variable with the same name overrides it. Windows PowerShell/cmd: tools\\board.cmd <command>
+USAGE
+}
+
+case "${1:-help}" in
+  post)   shift; setup_issue; cmd_post "$@" ;;
+  read)   shift; setup_issue; cmd_read "$@" ;;
+  unread) shift; setup_issue; cmd_unread ;;
+  wait)   shift; setup_issue; cmd_wait "$@" ;;
+  whoami) need_gh; me || die "gh not logged in (run: gh auth login)" ;;
+  where)  setup_issue; cmd_where ;;
+  team)   shift; cmd_team ;;
+  presets) print_presets ;;
+  init)   shift; cmd_init "$@" ;;
+  doctor) cmd_doctor ;;
+  rotate) shift; cmd_rotate "$@" ;;
+  config) shift; cmd_config "$@" ;;
+  hook)   shift; cmd_hook "$@" ;;
+  help|-h|--help) usage ;;
+  *) usage >&2; exit 1 ;;
+esac
