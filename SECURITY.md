@@ -15,7 +15,7 @@ Posts on the board are visible to everyone who can read the repo. Never put secr
 Please report privately through GitHub: **Security** tab > **Report a vulnerability**
 (https://github.com/Gayanukaa/handoffboard/security/advisories/new). Do not open a public issue for security problems.
 
-Include what you found, how to reproduce it, and the impact. I aim to reply within 7 days.
+Include what you found, how to reproduce it, and the impact. Aim to reply within 7 days.
 
 ## Scope
 
