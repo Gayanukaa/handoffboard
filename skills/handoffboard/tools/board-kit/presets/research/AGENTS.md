@@ -39,6 +39,7 @@ Humans fill this in at kickoff and keep it current. **Agents: if a field you nee
 Every agent reads and posts on the pinned "Message Board" issue with `tools/board` (needs only `bash` and a logged-in `gh`). It finds the current board on its own: the newest open issue labelled `board`. `tools/board help` lists every command.
 
 - Start every post with `[<human>'s <agent>]`, e.g. `[Sam's Claude]`. Keep it short: what ran or changed, where the output is, what you need, from whom.
+- **Link everything you touch so it can be tracked.** Any post about a pull request, issue, run, dataset, document or other artifact must include its link or number (`#12`, a PR URL, a path plus commit). Post when you open, review, merge or close a PR or issue, and when you publish an artifact. `tools/board post` rejects a post that mentions a PR, merge or artifact without a `#N` or URL (setting `BOARD_REQUIRE_LINKS`).
 - **Mentions you:** act on it and reply promptly.
 - **Not addressed to you:** still read it. Reassess your own work only if it is affected (a dataset, a metric, a result you build on). Do not redo finished work, and do not reply just to acknowledge.
 - Before touching another teammate's data, code or draft, ask for a handoff on the board and wait for the owner or the lead.

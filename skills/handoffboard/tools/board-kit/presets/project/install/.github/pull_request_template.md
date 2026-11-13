@@ -9,3 +9,4 @@ Closes #
 - [ ] Rebased on fresh `main`; tests pass locally
 - [ ] If this changes an API, schema, or env var: posted on the board and added an entry to `docs/decisions.md`
 - [ ] Reviewed by someone other than the author
+- [ ] Posted this PR's link on the board (and linked the issue and any artifacts it produces)

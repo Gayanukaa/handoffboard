@@ -340,6 +340,9 @@ cmd_post() {
     "["*"'s "*"]"*) ;;
     *) die "post must start with [<human>'s <agent>], e.g. [Sam's Claude]" ;;
   esac
+  if [ "$(setting BOARD_REQUIRE_LINKS on)" != off ]      && printf '%s' "$text" | grep -qiE '(^|[^a-z])(prs?|pull request|merged|artifacts?)([^a-z]|$)'      && ! printf '%s' "$text" | grep -qE '#[0-9]+|https?://'; then
+    die "post mentions a PR, merge or artifact but has no link. Add #N or a URL so it can be tracked (BOARD_REQUIRE_LINKS=off to disable)."
+  fi
   local url
   url="$(gh api "repos/$REPO/issues/$ISSUE/comments" -f body="$text" --jq .html_url 2>&1)" || die "post failed: $(printf '%s' "$url" | head -n 1)"
   printf '%s\n' "$url" | strip_cr
@@ -403,7 +406,7 @@ cmd_where() {
 
 cmd_config() {
   local k v
-  for k in ${1:-BOARD_PRESET BOARD_ISSUE BOARD_LABEL BOARD_TITLE BOARD_INTERVAL BOARD_WAIT BOARD_TEAM BOARD_REPO}; do
+  for k in ${1:-BOARD_PRESET BOARD_ISSUE BOARD_LABEL BOARD_TITLE BOARD_INTERVAL BOARD_WAIT BOARD_TEAM BOARD_REQUIRE_LINKS BOARD_REPO}; do
     case "$k" in
       BOARD_PRESET) v="$(setting BOARD_PRESET '')" ;;
       BOARD_ISSUE) v="$(setting BOARD_ISSUE auto)" ;;
@@ -847,7 +850,7 @@ tools/board doctor             check that everything is set up for you
 tools/board rotate [--title T] [--summary S]
                                start a fresh board issue and close the current one
 tools/board config [KEY]       show the effective settings
-Settings: tools/board.conf (BOARD_PRESET, BOARD_ISSUE, BOARD_LABEL, BOARD_TITLE, BOARD_INTERVAL, BOARD_WAIT, BOARD_TEAM, BOARD_REPO);
+Settings: tools/board.conf (BOARD_PRESET, BOARD_ISSUE, BOARD_LABEL, BOARD_TITLE, BOARD_INTERVAL, BOARD_WAIT, BOARD_TEAM, BOARD_REQUIRE_LINKS, BOARD_REPO);
 an environment variable with the same name overrides it. Windows PowerShell/cmd: tools\\board.cmd <command>
 USAGE
 }

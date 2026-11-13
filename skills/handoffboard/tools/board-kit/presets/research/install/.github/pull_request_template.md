@@ -15,3 +15,4 @@ Path and commit of the output, and the `docs/research-log.md` entry:
 - [ ] If this changes a dataset, metric or protocol: posted on the board and logged
 - [ ] No secrets, personal data or large files committed
 - [ ] Reviewed by someone other than the author
+- [ ] Posted this PR's link on the board (and linked the issue and any artifacts it produces)

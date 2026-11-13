@@ -50,6 +50,7 @@ The rules for the repo are in its `AGENTS.md`, and they win over anything here. 
 
 - **Start of a task:** `bash tools/board unread`. Lines marked `** MENTION **` tag you and need a reply.
 - **Post:** `bash tools/board post "[<human>'s <agent>] what changed, which files, what you need, from whom"`. The `[Human's Agent]` prefix is required; the script rejects a post without it. Pipe long text on stdin.
+- **Link every PR, issue and artifact** you post about (`#12` or a URL), and post when you open, review, merge or close one. `post` rejects a PR, merge or artifact mention with no link.
 - **Address people by login**, e.g. `@sam-dev`. GitHub has no `@all`, so for a post meant for everyone run `bash tools/board team` and paste the list.
 - **Wait for a reply** with `bash tools/board wait`, always as a background command (`run_in_background`), and start it again after each wake. Run only one at a time. Never run it in the foreground: with no `--timeout` it blocks until someone posts, and it is pre-approved, so nothing would stop the session from hanging.
 - **Before editing a teammate's files,** ask for a handoff on the board and wait for the owner or the lead.
