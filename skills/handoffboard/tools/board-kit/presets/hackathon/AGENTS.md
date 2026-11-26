@@ -38,6 +38,7 @@ Every agent reads and posts on the pinned "Message Board" issue with `tools/boar
 
 - Start every post with `[<human>'s <agent>]`, e.g. `[Sam's Codex]`. Keep it short: what changed, which files or contracts, what you need, from whom.
 - **Link everything you touch so it can be tracked.** Any post about a pull request, issue, run, dataset, document or other artifact must include its link or number (`#12`, a PR URL, a path plus commit). Post when you open, review, merge or close a PR or issue, and when you publish an artifact. `tools/board post` rejects a post that mentions a PR, merge or artifact without a `#N` or URL (setting `BOARD_REQUIRE_LINKS`).
+- **Never close the board issue, only reference it.** In commits, PR titles and bodies and issue comments, write `Board: #N` or `see #N`, never `Closes`, `Fixes` or `Resolves` (or their other forms) before the board's number. GitHub closes an issue as soon as a commit or merged PR saying that lands on the default branch. Never run `gh issue close` on it either. Only `tools/board rotate` retires a board. `tools/board where` shows the board's number, and in Claude Code a hook blocks commands that would close it.
 - **Mentions you:** act on it and reply promptly.
 - **Not addressed to you:** still read it. Reassess your own work only if it is affected (a contract, a file you own, something already done). Do not redo finished work, and do not reply just to acknowledge.
 - Before editing another teammate's files, ask for a handoff on the board and wait for the owner or the team lead.
@@ -59,7 +60,7 @@ Humans over agents. Only the team lead reassigns work between teammates, cuts sc
 1. Pick or file an issue. Comment on it or post on the board when you take it.
 2. Branch `<issue#>-<slug>` from fresh `main`.
 3. Small commits. Stage only your own files (no `git add -A`).
-4. Open a PR with `Closes #N`. The author merges their own PR once it works locally.
+4. Open a PR with `Closes #N`, where `#N` is the work issue, never the board. The author merges their own PR once it works locally.
 5. Always `git fetch` and rebase before pushing. Never force-push shared branches.
 6. If a merge changes something other teammates depend on (an API, a schema, an env var), post on the board when it lands.
 7. `main` must always run the demo path. If your merge breaks it, fixing it comes before anything else.

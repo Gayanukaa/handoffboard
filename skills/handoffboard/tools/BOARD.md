@@ -23,7 +23,7 @@ This guide is the setup and troubleshooting notes. Two other places hold the res
 
 ## Presets
 
-`init` asks you to pick one. Each is a starting point for the rules, the settings and a few repo files.
+`init` asks you to pick one or more. Each is a starting point for the rules, the settings and a few repo files.
 
 | Preset | For | Adds to your repo |
 |---|---|---|
@@ -31,13 +31,17 @@ This guide is the setup and troubleshooting notes. Two other places hold the res
 | `hackathon` | a short event | deadlines and freeze times, competition rules, a submission checklist |
 | `research` | a research effort | experiment template, reproducibility rules, a findings log, code owners |
 
-Run `tools/board presets` to list them. You can change the rules and settings freely afterwards; `init` never replaces a file you already have.
+Run `tools/board presets --files` to list them with the files each adds. You can change the rules and settings freely afterwards; `init` never replaces a file you already have.
+
+**Combining presets.** A repo can be more than one thing, e.g. a product that is also a research effort. Pass a comma-separated list, main one first: `--preset project,research`. The main preset supplies `board.conf`, the board issue text and the base rules (board, chain of command, workflow). Each other preset adds its own `AGENTS.md` sections under "Also from the <name> preset" and its own files. When two presets ship the same file (`CODEOWNERS`, the PR template), the main preset's copy is kept; merge the other's lines in by hand if you want them. To add a preset to a repo that is already set up, re-run `init` with the full list.
+
+**Leaving out templates.** `--skip feature_request.md,CODEOWNERS` (file names or paths) stops `init` adding those files. The list is saved as `BOARD_SKIP` in `tools/board.conf`, so a re-run won't add them back. If you delete a preset file later, add it to `BOARD_SKIP` too.
 
 ## Setup (about 5 minutes, team lead)
 
 1. **Copy the `tools/` folder into the root of your repo.** Nothing here overwrites an existing file, so it works in a brand-new repo or an existing one. The repo needs a GitHub remote.
 2. **Run setup once** and choose a preset:
-   - macOS / Linux / Git Bash: `bash tools/board init --preset project`
+   - macOS / Linux / Git Bash: `bash tools/board init --preset project` (or `--preset project,research`)
    - Windows PowerShell or cmd: `tools\board.cmd init --preset project`
 3. **Fill in the "FILL THIS IN" block** in `AGENTS.md`. If your preset added `.github/CODEOWNERS`, fill in its paths too.
 4. **Commit and push** the files init added (it lists them).
@@ -49,16 +53,20 @@ Run `tools/board presets` to list them. You can change the rules and settings fr
 
 | Step | New repo | Repo that already has the file |
 |---|---|---|
-| Settings | creates `tools/board.conf` from the preset | keeps yours, records the preset in it |
-| Team rules | creates `AGENTS.md` | appends the board rules to your `AGENTS.md` |
+| Settings | creates `tools/board.conf` from the main preset | keeps yours, records the presets (and `--skip` list) in it |
+| Team rules | creates `AGENTS.md`, plus an "Also from" section per extra preset | appends the board rules to your `AGENTS.md`; adds a missing extra preset's section |
 | Claude Code rules | creates `CLAUDE.md` with `@AGENTS.md` | adds the `@AGENTS.md` line |
-| Claude Code hooks | creates `.claude/settings.json` | merges the two hooks into your settings |
+| Claude Code hooks | creates `.claude/settings.json` | merges the three hooks into your settings (adds the guard to older setups) |
 | Line endings | creates `.gitattributes` | appends a few lines, so the script works on Windows checkouts |
-| Preset files | adds the issue templates and other files the preset ships | keeps any file that already exists |
+| Preset files | adds the issue templates and other files each preset ships, except `--skip` ones | keeps any file that already exists |
 | GitHub | creates the `board` label, finds or creates the board issue, and pins it | same |
 | Permissions | marks `tools/board` executable in git | same |
 
 The board's local state (read cursor, cached login) lives in `.board/`, which ignores itself, so you don't need to edit `.gitignore`.
+
+## The board is never closed by a commit or PR
+
+The board is a channel, not a task. GitHub closes an issue when a commit or merged PR on the default branch says `Closes #N`, `Fixes #N` or `Resolves #N` (or closed, fixed, resolved and so on). So commits and PRs reference the board as `Board: #N`, and use closing keywords only for the work issue they finish. `AGENTS.md`, the board issue and the PR template all say so. In Claude Code, a `PreToolUse` hook (`tools/board hook guard`) checks every Bash and PowerShell command and blocks one that would close the board: `gh issue close` on it, an API call setting it to closed, or a git or gh command whose text has a closing keyword next to its number. The hook makes no network call. It reads the board number cached in `.board/issue` by the last command that found the board. Other agents rely on the rules in `AGENTS.md`. If the board does get closed, reopen it (`gh issue reopen N`); `tools/board doctor` reports a closed board.
 
 ## Reaching the whole team
 
@@ -113,7 +121,8 @@ The script needs only `bash` and `gh`, so any agent that can run a shell command
 
 - **`\r: command not found` or `bad interpreter`:** the script got Windows line endings. Run `sed -i 's/\r$//' tools/board` (macOS: `sed -i '' 's/\r$//' tools/board`), then `tools/board init` to add the `.gitattributes` rules that stop it from happening again.
 - **`no board issue found`:** run `tools/board init`. Someone may have closed the board without rotating it.
-- **`choose a preset`:** `init` needs a preset when it can't ask you. Pass `--preset project`, `--preset hackathon` or `--preset research`.
+- **`choose a preset`:** `init` needs a preset when it can't ask you. Pass `--preset project`, `--preset hackathon`, `--preset research`, or several, e.g. `--preset project,research`.
+- **`Blocked by handoffboard: #N is the team's message board`:** a command would have closed the board. Reword it to reference the board as `Board: #N`, without a closing keyword.
 - **`no teammates found`:** set `BOARD_TEAM` in `tools/board.conf`, or add the teammates as collaborators on the repo.
 - **Agents still reading an old board after a rotate:** they re-resolve the board each time they start a command, so re-arming the wait is enough.
 - **`cannot work out the GitHub repo`:** add a remote (`git remote add origin <url>`) or set `BOARD_REPO=owner/name`.

@@ -6,7 +6,7 @@ Handoffboard is a skill plus a bash script (`tools/board`). When you run `init` 
 
 - creates a `board` label and a pinned issue on that GitHub repo, using your `gh` login;
 - adds or appends to `tools/board.conf`, `AGENTS.md`, `CLAUDE.md`, `.gitattributes`, `.github/` and `.claude/settings.json`;
-- adds two Claude Code hooks that run `tools/board` at session start and on every prompt.
+- adds three Claude Code hooks: two run `tools/board` at session start and on every prompt, and one runs before each Bash or PowerShell command and blocks commands that would close the board issue. The guard reads the command text locally and makes no network call.
 
 Posts on the board are visible to everyone who can read the repo. Never put secrets or personal data in a board post.
 

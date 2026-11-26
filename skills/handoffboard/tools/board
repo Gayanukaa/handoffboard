@@ -15,7 +15,8 @@ PRESETS="$KIT/presets"
 STATE_DIR="$ROOT/.board"
 AGENTS_MARK='<!-- handoffboard:start -->'
 GA_MARK='# handoffboard:'
-HOOK_MARK='tools/board\" hook'
+HOOK_MARK='tools/board\" hook session-start'
+GUARD_MARK='tools/board\" hook guard'
 
 die()  { echo "board: $*" >&2; exit 1; }
 warn() { echo "board: $*" >&2; }
@@ -91,31 +92,56 @@ preset_blurb() {
 
 valid_preset() { [ -n "$1" ] && [[ "$1" =~ ^[a-z0-9-]+$ ]] && [ -f "$PRESETS/$1/AGENTS.md" ]; }
 
+# $1 = --files: also list the files each preset's install/ folder adds to the repo.
 print_presets() {
   local p
-  for p in $(list_presets); do printf '  %-10s %s\n' "$p" "$(preset_blurb "$p")"; done
+  for p in $(list_presets); do
+    printf '  %-10s %s\n' "$p" "$(preset_blurb "$p")"
+    if [ "${1:-}" = --files ] && [ -d "$PRESETS/$p/install" ]; then
+      (cd "$PRESETS/$p/install" && find . -type f | sed 's|^\./|             |' | sort)
+    fi
+  done
+  [ "${1:-}" = --files ] || return 0
+  echo "Combine presets with commas, main one first: init --preset project,research"
 }
 
-# Pick the preset: --preset flag, else BOARD_PRESET (env or tools/board.conf), else ask (terminal only).
+# Normalise a preset list ("Project + research" -> "project,research"), dropping repeats.
+# Fails (prints nothing) if any name is not a preset.
+norm_presets() {
+  local p out="" parts
+  IFS=',' read -ra parts <<< "$(printf '%s' "$1" | tr 'A-Z+ ' 'a-z,,')"
+  for p in "${parts[@]}"; do
+    [ -n "$p" ] || continue
+    valid_preset "$p" || return 1
+    case ",$out," in *",$p,"*) continue ;; esac
+    out="${out:+$out,}$p"
+  done
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+presets_in() { printf '%s\n' "$1" | tr ',' '\n'; }
+
+# Pick the preset(s): --preset flag, else BOARD_PRESET (env or tools/board.conf), else ask (terminal only).
+# Prints a comma-separated list; the first is the main preset (settings, issue body, base rules).
 choose_preset() {
-  local want="$1" ans
+  local want="$1" ans norm
   [ -n "$want" ] || want="$(setting BOARD_PRESET '')"
   if [ -n "$want" ]; then
-    valid_preset "$want" || die "unknown preset '$want'. Choose one of:"$'\n'"$(print_presets)"
-    printf '%s\n' "$want"; return 0
+    norm="$(norm_presets "$want")" || die "unknown preset in '$want'. Choose one or more of (comma-separated, main one first):"$'\n'"$(print_presets)"
+    printf '%s\n' "$norm"; return 0
   fi
   if [ -t 0 ] && [ -t 2 ]; then
     {
-      echo "Which preset fits your team?"
+      echo "Which preset fits your team? Combine with commas, main one first (e.g. project,research)."
       print_presets
       printf 'Preset: '
     } >&2
     read -r ans
-    ans="$(printf '%s' "$ans" | tr 'A-Z' 'a-z' | tr -d '[:space:]')"
-    valid_preset "$ans" || die "unknown preset '$ans'"
-    printf '%s\n' "$ans"; return 0
+    norm="$(norm_presets "$ans")" || die "unknown preset in '$ans'"
+    printf '%s\n' "$norm"; return 0
   fi
-  die "choose a preset: tools/board init --preset <name>"$'\n'"$(print_presets)"
+  die "choose a preset (ask the user, don't pick one for them): tools/board init --preset <name>[,<name>]"$'\n'"$(print_presets)"
 }
 
 # ---------------------------------------------------------------- repo and issue
@@ -166,7 +192,9 @@ repo() {
 REPO=""
 ISSUE=""
 ISSUE_SRC=""
-PRESET=""
+PRESET=""        # main preset (init only)
+PRESET_LIST=""   # every chosen preset, comma-separated, main one first (init only)
+SKIP=""          # comma-separated install paths not to add (init --skip)
 
 setup_repo() {
   [ -n "$REPO" ] && return 0
@@ -208,6 +236,19 @@ setup_issue() {
   [ -n "$v" ] || die "no board issue found in $REPO (none set in tools/board.conf and no open issue labelled '$LABEL'). Run: tools/board init"
   ISSUE="$v"
   ISSUE_SRC="$src"
+  cache_issue "$v"
+}
+
+# The guard hook runs before every shell command, so it must not call GitHub. It reads the board number
+# cached here by the last command that resolved it (the session-start hook always does).
+cache_issue() { ensure_state_dir 2>/dev/null && printf '%s\n' "$1" > "$STATE_DIR/issue" 2>/dev/null; return 0; }
+
+cached_issue() {
+  local n="" f="$STATE_DIR/issue"
+  [ -s "$f" ] && n="$(strip_cr < "$f")"
+  case "$n" in ''|*[!0-9]*) n="${BOARD_ISSUE:-$(conf_get BOARD_ISSUE)}" ;; esac
+  case "$n" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$n"
 }
 
 me() {
@@ -406,7 +447,7 @@ cmd_where() {
 
 cmd_config() {
   local k v
-  for k in ${1:-BOARD_PRESET BOARD_ISSUE BOARD_LABEL BOARD_TITLE BOARD_INTERVAL BOARD_WAIT BOARD_TEAM BOARD_REQUIRE_LINKS BOARD_REPO}; do
+  for k in ${1:-BOARD_PRESET BOARD_ISSUE BOARD_LABEL BOARD_TITLE BOARD_INTERVAL BOARD_WAIT BOARD_TEAM BOARD_REQUIRE_LINKS BOARD_REPO BOARD_SKIP}; do
     case "$k" in
       BOARD_PRESET) v="$(setting BOARD_PRESET '')" ;;
       BOARD_ISSUE) v="$(setting BOARD_ISSUE auto)" ;;
@@ -416,6 +457,7 @@ cmd_config() {
       BOARD_INTERVAL) v="$(setting BOARD_INTERVAL 30)" ;;
       BOARD_WAIT) v="$(wait_mode)" ;;
       BOARD_REPO) v="$(setting BOARD_REPO '')" ;;
+      BOARD_SKIP) v="$(setting BOARD_SKIP '')" ;;
       *) die "config: unknown key $k" ;;
     esac
     if [ $# -gt 0 ]; then echo "$v"; else echo "$k=$v"; fi
@@ -473,11 +515,42 @@ hook_prompt() {
   return 0
 }
 
+# PreToolUse hook for Bash and PowerShell. Blocks (exit 2) any command that would close the board issue:
+# `gh issue close/delete/lock/transfer <board>`, an API call setting it to closed, or a git/gh command whose
+# text has a GitHub closing keyword ("Closes #N", "fixes owner/repo#N", ".../issues/N") aimed at the board.
+# A commit or PR body with those words closes the issue once it lands on the default branch.
+# Only `tools/board rotate` closes a board, and it does that inside the script, not in the command text.
+hook_guard() {
+  local input n kw ref why=""
+  input="$(cat | sed 's/\\[nrt]/ /g')"
+  n="$(cached_issue)" || return 0
+  case "$input" in *"$n"*) ;; *) return 0 ;; esac
+  kw='(close[sd]?|fix(e[sd])?|resolve[sd]?)'
+  ref="(#|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#|(https?://)?(www\.)?github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/)$n([^0-9]|\$)"
+  if printf '%s' "$input" | grep -qiE "gh[[:space:]]+issue[[:space:]]+(close|delete|lock|transfer)[^|;&]*[[:space:]#/]$n([^0-9]|\$)"; then
+    why="it runs gh issue close/delete/lock/transfer on the board"
+  elif printf '%s' "$input" | grep -qiE "issues/$n([^0-9]|\$).*state=?[\"']?closed|state=?[\"']?closed.*issues/$n([^0-9]|\$)"; then
+    why="it sets the board issue's state to closed"
+  elif printf '%s' "$input" | grep -qiE "(^|[^a-z0-9_-])(git|gh)[[:space:]]" \
+       && printf '%s' "$input" | grep -qiE "(^|[^a-z])$kw:?[[:space:]]+$ref"; then
+    why="its text says close/fix/resolve next to #$n, and GitHub closes an issue when a commit or PR saying that lands"
+  fi
+  [ -n "$why" ] || return 0
+  cat >&2 <<MSG
+Blocked by handoffboard: #$n is the team's message board, and $why.
+Never close the board. Reference it without a closing keyword (e.g. "Board: #$n" or "see #$n"),
+and use Closes/Fixes only for the work issue the change actually finishes.
+Only the team lead retires a board, with: bash tools/board rotate --summary "..."
+MSG
+  exit 2
+}
+
 cmd_hook() {
   case "${1:-}" in
     session-start) hook_session_start ;;
     prompt) hook_prompt ;;
-    *) die "hook: expected session-start or prompt" ;;
+    guard) hook_guard ;;
+    *) die "hook: expected session-start, prompt or guard" ;;
   esac
   exit 0
 }
@@ -486,7 +559,8 @@ cmd_hook() {
 
 issue_body() {
   local t="$ROOT/.github/ISSUE_TEMPLATE/message-board.md"
-  [ -f "$t" ] || t="$PRESETS/${PRESET:-project}/install/.github/ISSUE_TEMPLATE/message-board.md"
+  local p="${PRESET:-$(setting BOARD_PRESET project)}"
+  [ -f "$t" ] || t="$PRESETS/${p%%,*}/install/.github/ISSUE_TEMPLATE/message-board.md"
   if [ -f "$t" ]; then
     strip_cr < "$t" | awk 'NR==1 && /^---$/ {fm=1; next} fm && /^---$/ {fm=0; next} !fm' | sed '/./,$!d'
   else
@@ -518,21 +592,25 @@ normalize_kit() {
   done < <({ [ -f "$CONF" ] && echo "$CONF"; find "$KIT" -type f; })
 }
 
-# tools/board.conf: created from the preset. An existing one is kept; only BOARD_PRESET is recorded in it.
+# tools/board.conf: created from the main preset. An existing one is kept; only BOARD_PRESET is recorded in it.
 merge_conf() {
-  local src="$PRESETS/$PRESET/board.conf"
+  local src="$PRESETS/$PRESET/board.conf" old
   if [ ! -f "$CONF" ]; then
     [ -f "$src" ] || { warn "missing $src"; return 0; }
     strip_cr < "$src" > "$CONF"
-    say "created tools/board.conf from the '$PRESET' preset"
-  elif [ "$(conf_get BOARD_PRESET)" != "$PRESET" ]; then
-    conf_set BOARD_PRESET "$PRESET"
-    say "kept tools/board.conf, set BOARD_PRESET=$PRESET"
-    if [ -f AGENTS.md ] && grep -qF "$AGENTS_MARK" AGENTS.md; then
-      warn "AGENTS.md already has board rules and was not changed, so they may be from another preset. Edit it by hand if you are switching presets."
-    fi
+    [ "$PRESET_LIST" = "$PRESET" ] || conf_set BOARD_PRESET "$PRESET_LIST"
+    say "created tools/board.conf from the '$PRESET' preset (BOARD_PRESET=$PRESET_LIST)"
   else
-    say "kept tools/board.conf"
+    old="$(conf_get BOARD_PRESET)"
+    if [ "$old" = "$PRESET_LIST" ]; then
+      say "kept tools/board.conf"
+      return 0
+    fi
+    conf_set BOARD_PRESET "$PRESET_LIST"
+    say "kept tools/board.conf, set BOARD_PRESET=$PRESET_LIST"
+    if [ -n "$old" ] && [ "${old%%,*}" != "$PRESET" ] && [ -f AGENTS.md ] && grep -qF "$AGENTS_MARK" AGENTS.md; then
+      warn "AGENTS.md already has the '${old%%,*}' rules as its base and they were not replaced. Edit it by hand if you are switching the main preset."
+    fi
   fi
 }
 
@@ -553,18 +631,65 @@ GA
   say "added line-ending rules to .gitattributes"
 }
 
+# What an extra preset adds on top of the main preset's rules: its FILL THIS IN table and its own
+# sections (numbered 4 and up; 1-3 are the board, chain of command and workflow, which the main preset has).
+preset_extra_block() {
+  local p="$1"
+  echo "<!-- handoffboard:preset $p -->"
+  echo "## Also from the $p preset"
+  echo
+  echo "This repo combines presets. These rules come on top of the ones above; where they disagree, the ones above win."
+  echo
+  strip_cr < "$PRESETS/$p/AGENTS.md" | awk '
+    /^## FILL THIS IN/ { fill = 1; next }
+    fill && /^\|/      { print; intable = 1; next }
+    fill && intable    { print ""; fill = 0; intable = 0 }
+    /^## [4-9]\./      { body = 1 }
+    /<!-- handoffboard:end -->/ { body = 0 }
+    body {
+      if ($0 ~ /^## [0-9]+\. /) sub(/^## [0-9]+\. /, "### ")
+      else if ($0 ~ /^###/) $0 = "#" $0
+      print
+    }'
+  echo "<!-- handoffboard:preset-end $p -->"
+}
+
+# Insert file $1 just before the end marker of the board rules in AGENTS.md (or at the end if there is none).
+agents_insert() {
+  local tmp
+  tmp="$(mktemp)" || return 1
+  if grep -qF '<!-- handoffboard:end -->' AGENTS.md; then
+    awk -v f="$1" '/<!-- handoffboard:end -->/ && !done { print ""; while ((getline l < f) > 0) print l; done = 1 } { print }' AGENTS.md > "$tmp"
+  else
+    { cat AGENTS.md; echo; cat "$1"; } > "$tmp"
+  fi
+  cat "$tmp" > AGENTS.md
+  rm -f "$tmp"
+}
+
 merge_agents() {
-  local src="$PRESETS/$PRESET/AGENTS.md"
+  local src="$PRESETS/$PRESET/AGENTS.md" p blk
   [ -f "$src" ] || { warn "missing $src"; return 0; }
   if [ ! -f AGENTS.md ]; then
     strip_cr < "$src" > AGENTS.md
-    say "created AGENTS.md (team rules)"
+    say "created AGENTS.md (team rules, '$PRESET' preset)"
   elif grep -qF "$AGENTS_MARK" AGENTS.md; then
     say "kept AGENTS.md (already has the board rules)"
   else
     { echo; strip_cr < "$src"; } >> AGENTS.md
-    say "appended the board rules to your existing AGENTS.md"
+    say "appended the '$PRESET' board rules to your existing AGENTS.md"
   fi
+  for p in $(presets_in "$PRESET_LIST"); do
+    [ "$p" = "$PRESET" ] && continue
+    if grep -qF "<!-- handoffboard:preset $p -->" AGENTS.md; then
+      say "kept AGENTS.md's '$p' section"
+      continue
+    fi
+    blk="$(mktemp)" || continue
+    preset_extra_block "$p" > "$blk"
+    agents_insert "$blk" && say "added the '$p' preset's rules to AGENTS.md (\"Also from the $p preset\")"
+    rm -f "$blk"
+  done
 }
 
 merge_claude_md() {
@@ -621,7 +746,7 @@ fs.writeFileSync(s, JSON.stringify(S, null, 2) + "\n");
 }
 
 merge_settings() {
-  local s=.claude/settings.json k="tools/board-kit/common/claude-settings.json"
+  local s=.claude/settings.json k="tools/board-kit/common/claude-settings.json" g="tools/board-kit/common/claude-guard.json"
   [ -f "$k" ] || { warn "missing $k"; return 0; }
   mkdir -p .claude
   if [ ! -f "$s" ]; then
@@ -633,7 +758,16 @@ merge_settings() {
     say "merged the board hooks into your existing $s"
   else
     warn "could not merge hooks into $s automatically (needs jq, python or node, and valid JSON)."
-    warn "Add the \"hooks\" entries from $k to it by hand."
+    warn "Add the \"hooks\" entries from $k and $g to it by hand."
+    return 0
+  fi
+  [ -f "$g" ] || { warn "missing $g"; return 0; }
+  if grep -qF "$GUARD_MARK" "$s"; then
+    say "kept $s (board guard hook already there)"
+  elif json_merge "$s" "$g"; then
+    say "added a hook to $s that stops agents closing the board issue"
+  else
+    warn "could not add the guard hook to $s; add the \"hooks\" entries from $g by hand."
   fi
 }
 
@@ -647,19 +781,41 @@ install_alts() {
   esac
 }
 
-# Copy every file under the preset's install/ folder to the same relative path. Never overwrites.
+# True if install path $1 was named in --skip (by full path or file name).
+skipped() {
+  local s parts
+  IFS=',' read -ra parts <<< "$SKIP"
+  for s in "${parts[@]}"; do
+    s="${s#./}"
+    [ -n "$s" ] && { [ "$s" = "$1" ] || [ "$s" = "$(basename "$1")" ]; } && return 0
+  done
+  return 1
+}
+
+# Copy every file under each chosen preset's install/ folder to the same relative path, main preset first.
+# Never overwrites. When two presets ship the same path, the earlier one's file is kept.
 install_preset_files() {
-  local base="$PRESETS/$PRESET/install" src rel alt skip
-  [ -d "$base" ] || return 0
-  while IFS= read -r src; do
-    rel="${src#"$base"/}"
-    skip=""
-    for alt in "$rel" $(install_alts "$rel"); do
-      if [ -e "$alt" ]; then say "kept existing $alt"; skip=1; break; fi
-    done
-    [ -n "$skip" ] && continue
-    mkdir -p "$(dirname "$rel")" && strip_cr < "$src" > "$rel" && say "added $rel"
-  done < <(find "$base" -type f | sort)
+  local p base src rel alt skip added="|" owner
+  for p in $(presets_in "$PRESET_LIST"); do
+    base="$PRESETS/$p/install"
+    [ -d "$base" ] || continue
+    while IFS= read -r src; do
+      rel="${src#"$base"/}"
+      if skipped "$rel"; then say "skipped $rel ('$p' preset; --skip)"; continue; fi
+      case "$added" in
+        *"|$rel="*)
+          owner="${added#*|"$rel"=}"; owner="${owner%%|*}"
+          say "kept $rel from '$owner'; '$p' has its own version (merge them by hand if you want both)"
+          continue ;;
+      esac
+      skip=""
+      for alt in "$rel" $(install_alts "$rel"); do
+        if [ -e "$alt" ]; then say "kept existing $alt"; skip=1; break; fi
+      done
+      [ -n "$skip" ] && continue
+      mkdir -p "$(dirname "$rel")" && strip_cr < "$src" > "$rel" && say "added $rel ('$p' preset)" && added="$added$rel=$p|"
+    done < <(find "$base" -type f | sort)
+  done
 }
 
 mark_executable() {
@@ -675,10 +831,14 @@ cmd_init() {
     case "$1" in
       --preset) preset_arg="${2:-}"; shift 2 ;;
       --preset=*) preset_arg="${1#--preset=}"; shift ;;
-      *) die "init: unknown arg $1 (use --preset <name>)" ;;
+      --skip) SKIP="${2:-}"; shift 2 ;;
+      --skip=*) SKIP="${1#--skip=}"; shift ;;
+      *) die "init: unknown arg $1 (use --preset <name>[,<name>] [--skip <file>[,<file>]])" ;;
     esac
   done
-  PRESET="$(choose_preset "$preset_arg")" || exit 1
+  PRESET_LIST="$(choose_preset "$preset_arg")" || exit 1
+  PRESET="${PRESET_LIST%%,*}"
+  [ -n "$SKIP" ] || SKIP="$(setting BOARD_SKIP '')"
   need_gh
   gh auth status >/dev/null 2>&1 || die "gh is not logged in. Run: gh auth login"
   cd "$ROOT" || die "cannot open $ROOT"
@@ -686,11 +846,15 @@ cmd_init() {
   [ -z "$(git rev-parse --show-prefix 2>/dev/null)" ] \
     || die "tools/ must sit at the repo root ($(git rev-parse --show-toplevel)). Move the tools/ folder there and rerun."
 
-  echo "Setting up handoffboard in $ROOT (preset: $PRESET)"
+  echo "Setting up handoffboard in $ROOT (preset: $PRESET_LIST)"
   echo "Files (nothing that already exists is overwritten):"
   setup_repo   # fail early, before any file is written, if there is no GitHub remote
   normalize_kit
   merge_conf
+  if [ -n "$SKIP" ] && [ "$(conf_get BOARD_SKIP)" != "$SKIP" ]; then
+    conf_set BOARD_SKIP "$SKIP"
+    say "recorded BOARD_SKIP=$SKIP in tools/board.conf (re-running init won't add those files back)"
+  fi
   merge_gitattributes
   merge_agents
   merge_claude_md
@@ -719,6 +883,7 @@ cmd_init() {
     src="created"
   fi
   say "board issue: #$n ($src)  https://github.com/$REPO/issues/$n"
+  cache_issue "$n"
   if pin_issue "$n"; then say "pinned #$n"; else warn "could not pin #$n (a repo can pin at most 3 issues). Pin it by hand on GitHub."; fi
   if [ "$conf_issue" != auto ] && [ "$conf_issue" != "$n" ]; then
     conf_set BOARD_ISSUE "$n"
@@ -785,6 +950,7 @@ cmd_doctor() {
   if [ -f AGENTS.md ] && grep -qF "$AGENTS_MARK" AGENTS.md; then ok "AGENTS.md has the board rules"; else bad "AGENTS.md is missing the board rules (run tools/board init)"; fi
   if [ -f CLAUDE.md ] && strip_cr < CLAUDE.md | grep -qE '^[[:space:]]*@AGENTS\.md'; then ok "CLAUDE.md imports AGENTS.md"; else note "CLAUDE.md does not import AGENTS.md (only matters for Claude Code)"; fi
   if [ -f .claude/settings.json ] && grep -qF "$HOOK_MARK" .claude/settings.json; then ok "Claude Code hooks installed"; else note "Claude Code hooks not installed (only matters for Claude Code; run tools/board init)"; fi
+  if [ -f .claude/settings.json ] && grep -qF "$GUARD_MARK" .claude/settings.json; then ok "guard hook installed (Claude Code can't close the board issue)"; else note "guard hook missing, so nothing stops an agent closing the board issue (run tools/board init)"; fi
   if [ -f .gitattributes ] && grep -qF "$GA_MARK" .gitattributes; then ok ".gitattributes keeps the script's line endings"; else bad ".gitattributes rules missing; Windows checkouts may break the script (run tools/board init)"; fi
   if [ -f "$CONF" ] && has_cr "$CONF"; then bad "tools/board.conf has Windows line endings (run tools/board init)"; fi
   case "$(git ls-files -s -- tools/board 2>/dev/null)" in
@@ -822,6 +988,7 @@ cmd_rotate() {
   gh api "repos/$REPO/issues/$old/comments" -f body="$body" >/dev/null 2>&1 || warn "could not post the move notice on #$old"
   gh issue unpin "$old" --repo "$REPO" >/dev/null 2>&1
   pin_issue "$new" || warn "could not pin #$new; pin it by hand"
+  cache_issue "$new"
   gh issue close "$old" --repo "$REPO" --reason completed >/dev/null 2>&1 || warn "could not close #$old; close it by hand"
   c="$(conf_get BOARD_ISSUE)"
   case "$c" in
@@ -844,13 +1011,15 @@ tools/board wait [--interval S] [--timeout S] [--mentions|--all]
 tools/board team               the teammates' @logins, to paste into a post meant for everyone
 tools/board whoami             your GitHub login
 tools/board where              which repo and issue the board is
-tools/board presets            list the presets (project, hackathon, research)
-tools/board init [--preset P]  one-time setup: merge the board into this repo, create and pin the issue
+tools/board presets [--files]  list the presets (project, hackathon, research) and, with --files, what each adds
+tools/board init [--preset P[,P2]] [--skip FILE[,FILE]]
+                               one-time setup: merge the board into this repo, create and pin the issue.
+                               Several presets combine (main one first); --skip leaves out preset files
 tools/board doctor             check that everything is set up for you
 tools/board rotate [--title T] [--summary S]
                                start a fresh board issue and close the current one
 tools/board config [KEY]       show the effective settings
-Settings: tools/board.conf (BOARD_PRESET, BOARD_ISSUE, BOARD_LABEL, BOARD_TITLE, BOARD_INTERVAL, BOARD_WAIT, BOARD_TEAM, BOARD_REQUIRE_LINKS, BOARD_REPO);
+Settings: tools/board.conf (BOARD_PRESET, BOARD_ISSUE, BOARD_LABEL, BOARD_TITLE, BOARD_INTERVAL, BOARD_WAIT, BOARD_TEAM, BOARD_REQUIRE_LINKS, BOARD_REPO, BOARD_SKIP);
 an environment variable with the same name overrides it. Windows PowerShell/cmd: tools\\board.cmd <command>
 USAGE
 }
@@ -863,7 +1032,7 @@ case "${1:-help}" in
   whoami) need_gh; me || die "gh not logged in (run: gh auth login)" ;;
   where)  setup_issue; cmd_where ;;
   team)   shift; cmd_team ;;
-  presets) print_presets ;;
+  presets) shift; print_presets "${1:-}" ;;
   init)   shift; cmd_init "$@" ;;
   doctor) cmd_doctor ;;
   rotate) shift; cmd_rotate "$@" ;;

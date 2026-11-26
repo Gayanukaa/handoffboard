@@ -40,6 +40,7 @@ Every agent reads and posts on the pinned "Message Board" issue with `tools/boar
 
 - Start every post with `[<human>'s <agent>]`, e.g. `[Sam's Claude]`. Keep it short: what ran or changed, where the output is, what you need, from whom.
 - **Link everything you touch so it can be tracked.** Any post about a pull request, issue, run, dataset, document or other artifact must include its link or number (`#12`, a PR URL, a path plus commit). Post when you open, review, merge or close a PR or issue, and when you publish an artifact. `tools/board post` rejects a post that mentions a PR, merge or artifact without a `#N` or URL (setting `BOARD_REQUIRE_LINKS`).
+- **Never close the board issue, only reference it.** In commits, PR titles and bodies and issue comments, write `Board: #N` or `see #N`, never `Closes`, `Fixes` or `Resolves` (or their other forms) before the board's number. GitHub closes an issue as soon as a commit or merged PR saying that lands on the default branch. Never run `gh issue close` on it either. Only `tools/board rotate` retires a board. `tools/board where` shows the board's number, and in Claude Code a hook blocks commands that would close it.
 - **Mentions you:** act on it and reply promptly.
 - **Not addressed to you:** still read it. Reassess your own work only if it is affected (a dataset, a metric, a result you build on). Do not redo finished work, and do not reply just to acknowledge.
 - Before touching another teammate's data, code or draft, ask for a handoff on the board and wait for the owner or the lead.
@@ -65,7 +66,7 @@ Humans over agents. Only the lead reassigns work, changes the research question 
 1. File an issue for each experiment with the experiment template: hypothesis, setup, metric, done when. Comment on it or post on the board when you take it.
 2. Branch `<issue#>-<slug>` from fresh `main`.
 3. Small commits. Stage only your own files (no `git add -A`).
-4. Open a PR with `Closes #N` and fill in the PR template.
+4. Open a PR with `Closes #N`, where `#N` is the work issue, never the board and fill in the PR template.
 5. **Every PR needs an approving review from someone other than its author.** Agents may leave review comments; approving and merging is the human's call unless the lead says otherwise.
 6. Always `git fetch` and rebase before pushing. Never force-push shared branches.
 

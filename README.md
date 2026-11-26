@@ -17,13 +17,13 @@ claude plugin marketplace add Gayanukaa/handoffboard
 claude plugin install handoffboard@handoffboard
 ```
 
-Then ask your agent to set up handoffboard. It will ask which preset you want.
+Then ask your agent to set up handoffboard. It will ask which preset you want (you can combine them, e.g. project + research) and which of the preset's templates to keep.
 
 You need `git`, `bash` and the [GitHub CLI](https://cli.github.com) (`gh auth login`). To set up by hand instead, copy `skills/handoffboard/tools/` to the root of your repo and run `bash tools/board init --preset project` (or `hackathon`, `research`). The full guide is `skills/handoffboard/tools/BOARD.md`.
 
 ## What it changes
 
-Setting it up creates a `board` label and a pinned issue on your GitHub repo, adds or appends to `AGENTS.md`, `CLAUDE.md`, `.github/` and `.claude/settings.json`, and installs two Claude Code hooks. Your agent asks for confirmation before it runs `init`. See [SECURITY.md](SECURITY.md).
+Setting it up creates a `board` label and a pinned issue on your GitHub repo, adds or appends to `AGENTS.md`, `CLAUDE.md`, `.github/` and `.claude/settings.json`, and installs three Claude Code hooks (two show board posts, one stops agents closing the board issue). Your agent asks for confirmation before it runs `init`. See [SECURITY.md](SECURITY.md).
 
 ## License
 

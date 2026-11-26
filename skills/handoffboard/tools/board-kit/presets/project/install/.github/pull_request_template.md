@@ -1,3 +1,4 @@
+<!-- Closes # is for the work issue this PR finishes. Never put the message board's number here: mention it as "Board: #N". -->
 Closes #
 
 ## What changed

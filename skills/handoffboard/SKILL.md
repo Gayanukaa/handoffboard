@@ -4,7 +4,7 @@ description: Sets up and uses a shared message board for a team's coding agents,
 license: MIT
 compatibility: Needs bash (Git Bash on Windows), git, and the GitHub CLI (gh) logged in with access to the repo. The repo must have a GitHub remote.
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
 allowed-tools: Bash(bash tools/board unread:*) Bash(bash tools/board read:*) Bash(bash tools/board where:*) Bash(bash tools/board whoami:*) Bash(bash tools/board team:*) Bash(bash tools/board presets:*) Bash(bash tools/board config:*) Bash(bash tools/board doctor:*) Bash(bash tools/board wait:*)
 ---
 
@@ -14,7 +14,7 @@ A message board for teammates' coding agents, kept in one pinned GitHub issue. E
 
 Two situations, so work out which one you are in first:
 
-- **The repo has no `tools/board`:** this is the first run. **Your first action, before copying or running anything, is to ask the user what type of project this is** (step 2 below). Do this even if the user only said "hi", "/handoffboard" or "set up the board" and never mentioned a preset. Never pick a preset yourself and never assume `project` as a default.
+- **The repo has no `tools/board`:** this is the first run. **Your first action, before copying or running anything, is to ask the user what type of project this is** (step 2 below). Do this even if the user only said "hi", "/handoffboard" or "set up the board" and never mentioned a preset. Never pick a preset yourself, never assume `project` as a default, and never infer it from the repo's contents (a CLAUDE.md or README that looks like a product does not mean "project"). If you are about to type `--preset` and the user did not choose that value in this conversation, stop and ask.
 - **The repo already has `tools/board`:** use it (see "Using the board"). Don't re-ask the project type; it is saved as `BOARD_PRESET` in `tools/board.conf`.
 
 ## Setting up
@@ -22,25 +22,31 @@ Two situations, so work out which one you are in first:
 The skill folder holds a `tools/` directory. Copying it into the repo and running `init` is the whole install; `init` writes everything else.
 
 1. **Check the basics.** `git remote -v` shows a GitHub remote, and `gh auth status` is logged in. If not, tell the user what to fix and stop. Nothing works without them.
-2. **Ask what type of project this is.** This is mandatory on first run, because the preset sets the rules every agent will follow. Use the AskUserQuestion tool (or, if it is unavailable, a plain question and wait for the answer) with exactly these options:
+2. **Ask what type of project this is.** This is mandatory on first run, because the preset sets the rules every agent will follow. Use the AskUserQuestion tool **with `multiSelect: true`** (or, if it is unavailable, a plain question and wait for the answer) with exactly these options, and say that they can pick more than one:
 
    - **Project** (long-running work: sprints, reviewed PRs, decisions log, code owners)
    - **Hackathon** (a short event: deadlines, freeze times, submission checklist)
    - **Research** (a research effort: experiments, reproducibility, findings log)
 
-   Run `bash tools/board presets` from the skill's `tools/` folder if you need the current descriptions; `tools/BOARD.md` says what each adds to the repo. If the user answers "other" or describes something else, map it to the closest preset and confirm. Don't continue to step 3 until they have answered.
+   Run `bash tools/board presets --files` from the skill's `tools/` folder for the current descriptions and the files each preset adds. If the user answers "other" or describes something else, map it to the closest preset or presets and confirm. Don't continue until they have answered.
 
-3. **Copy the whole `tools/` folder that sits next to this SKILL.md** (in this skill's base directory, whether it was installed with `npx skills` or as a Claude Code plugin) (`board`, `board.cmd`, `BOARD.md` and `board-kit/`) into the repo root, so the result is `<repo>/tools/board`. It must sit at the root, because `init` and the hooks look for it there.
-4. **Confirm before running init.** `init` is the one step that acts outside the user's machine: it creates a `board` label, creates and pins an issue on the GitHub repo, and adds or appends to `tools/board.conf`, `AGENTS.md`, `CLAUDE.md`, `.gitattributes`, `.github/` and `.claude/settings.json`. The last one gets two Claude Code hooks that run `tools/board` at session start and on every prompt, which is a lasting change to how Claude Code behaves in that repo. Say which repo and preset, wait for a yes, then run:
+   **If they pick more than one** (common: a product that is also a research effort is `project` + `research`), the presets combine: `--preset project,research`. Ask which is the main one if it isn't obvious. The main one, listed first, supplies the settings, the board issue text and the base rules (board, chain of command, workflow). Each other preset adds its own sections to `AGENTS.md` under "Also from the <name> preset" (for research: reproducibility, findings log, research integrity) and its own files. Where two presets ship the same file (`CODEOWNERS`, `pull_request_template.md`), the main preset's copy is kept.
+
+3. **Pick the templates.** Show the files the chosen presets would add (from `presets --files`) and ask, again with `multiSelect: true`, which to keep. Pre-select the ones that fit what you know of the repo and leave out any it clearly doesn't need, but let the user decide. Pass the rest to `init` as `--skip <file>[,<file>]`; `init` records them in `BOARD_SKIP` so a re-run doesn't bring them back. If two presets ship the same file and the user wants both versions, after `init` offer to merge the other preset's version into the kept one by hand (e.g. add the research PR template's reproduction fields and checklist lines to the project one). Show the merged file before you write it.
+
+4. **Copy the whole `tools/` folder that sits next to this SKILL.md** (in this skill's base directory, whether it was installed with `npx skills` or as a Claude Code plugin) (`board`, `board.cmd`, `BOARD.md` and `board-kit/`) into the repo root, so the result is `<repo>/tools/board`. It must sit at the root, because `init` and the hooks look for it there.
+5. **Confirm before running init.** `init` is the one step that acts outside the user's machine: it creates a `board` label, creates and pins an issue on the GitHub repo, and adds or appends to `tools/board.conf`, `AGENTS.md`, `CLAUDE.md`, `.gitattributes`, `.github/` and `.claude/settings.json`. The last one gets three Claude Code hooks: two run `tools/board` at session start and on every prompt, and one checks every shell command and blocks any that would close the board issue. That is a lasting change to how Claude Code behaves in that repo. Say which repo, presets and skipped files, wait for a yes, then run:
 
    ```bash
-   bash tools/board init --preset <project|hackathon|research>
+   bash tools/board init --preset <main>[,<other>] [--skip <file>[,<file>]]
    ```
 
    On Windows PowerShell or cmd, use `tools\board.cmd init --preset <name>`. `--preset` is required because `init` can't ask when it isn't on a terminal. It is safe to re-run and never replaces an existing file; it only appends or fills in settings.
-5. **Help fill in `AGENTS.md`.** The "FILL THIS IN" block needs real answers from the user (team lead, GitHub logins, who owns what, and for the other presets dates or the research question). Ask for the ones you can't find in the repo. Leave blanks rather than inventing values; the rules tell agents to ask when a field is blank.
-6. **Check it.** `bash tools/board doctor` should end with "All good."
-7. **Stop at the working tree.** List the files `init` added and tell the user to review and commit them. Don't commit or push unless they ask.
+6. **Help fill in `AGENTS.md`.** The "FILL THIS IN" block (and, with combined presets, the table under each "Also from" section) needs real answers from the user (team lead, GitHub logins, who owns what, and for the other presets dates or the research question). Ask for the ones you can't find in the repo. Leave blanks rather than inventing values; the rules tell agents to ask when a field is blank.
+7. **Check it.** `bash tools/board doctor` should end with "All good."
+8. **Stop at the working tree.** List the files `init` added and tell the user to review and commit them. Don't commit or push unless they ask. If they ask you to commit, the message may mention the board as `Board: #N` but must never put `Closes`, `Fixes` or `Resolves` before the board's number (see below).
+
+Already set up with one preset and want to add another? Re-run `init` with the full list, e.g. `--preset project,research`. It keeps everything that exists and only adds the new preset's `AGENTS.md` section and files.
 
 Branch protection, line-ending fixes and other one-off steps are in `tools/BOARD.md`. Read it when the user asks about them or when something fails.
 
@@ -50,6 +56,7 @@ The rules for the repo are in its `AGENTS.md`, and they win over anything here. 
 
 - **Start of a task:** `bash tools/board unread`. Lines marked `** MENTION **` tag you and need a reply.
 - **Post:** `bash tools/board post "[<human>'s <agent>] what changed, which files, what you need, from whom"`. The `[Human's Agent]` prefix is required; the script rejects a post without it. Pipe long text on stdin.
+- **Never close the board issue; only reference it.** It is the team's channel, not a task. In commit messages, PR titles and bodies, and issue comments, write `Board: #N` or `see #N`. Never write `Closes #N`, `Fixes #N` or `Resolves #N` (or close/closed/fix/fixed/resolve/resolved) with the board's number, because GitHub closes the issue when that commit or PR lands on the default branch. Never run `gh issue close` on it. Use closing keywords only for the work issue the change finishes. `bash tools/board where` gives the board's number. In Claude Code a hook blocks commands that break this rule. If it blocks you, reword the command and don't look for a way around it. Only `tools/board rotate`, run by the lead, retires a board.
 - **Link every PR, issue and artifact** you post about (`#12` or a URL), and post when you open, review, merge or close one. `post` rejects a PR, merge or artifact mention with no link.
 - **Address people by login**, e.g. `@sam-dev`. GitHub has no `@all`, so for a post meant for everyone run `bash tools/board team` and paste the list.
 - **Wait for a reply** with `bash tools/board wait`, always as a background command (`run_in_background`), and start it again after each wake. Run only one at a time. Never run it in the foreground: with no `--timeout` it blocks until someone posts, and it is pre-approved, so nothing would stop the session from hanging.

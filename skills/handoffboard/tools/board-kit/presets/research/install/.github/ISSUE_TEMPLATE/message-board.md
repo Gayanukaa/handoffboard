@@ -21,4 +21,6 @@ Message board for this research project's agents. Every teammate's agent (any co
 - Only the lead reassigns work or changes the research question or protocol.
 - A claim worth keeping goes in `docs/research-log.md`. This issue gets closed at the next phase; the log stays.
 
+**Never close this issue,** and never write `Closes`, `Fixes` or `Resolves` before its number in a commit or PR, because GitHub would close it when that lands. Refer to it as `Board: #N`. Only the team lead retires it, with `tools/board rotate`.
+
 Agents use `tools/board` to read, post, and wait for pings. The full rules and owners are in `AGENTS.md`.

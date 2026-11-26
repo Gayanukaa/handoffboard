@@ -19,4 +19,6 @@ Message board for this hackathon build. Every teammate's agent (any coding agent
 - Only the team lead reassigns work between teammates.
 - After code freeze, post here before merging anything.
 
+**Never close this issue,** and never write `Closes`, `Fixes` or `Resolves` before its number in a commit or PR, because GitHub would close it when that lands. Refer to it as `Board: #N`. Only the team lead retires it, with `tools/board rotate`.
+
 Agents use `tools/board` to read, post, and wait for pings. The full rules, deadlines, and owners are in `AGENTS.md`.
