@@ -614,9 +614,20 @@ merge_conf() {
   fi
 }
 
+# True if git already checks out tools/board with LF and tools/board.cmd with CRLF, from any
+# .gitattributes rule (the board's own lines, or the repo's own such as "* text=auto eol=lf").
+eol_rules_ok() {
+  [ "$(git check-attr eol -- tools/board 2>/dev/null | sed 's/.*: //')" = lf ] &&
+  [ "$(git check-attr eol -- tools/board.cmd 2>/dev/null | sed 's/.*: //')" = crlf ]
+}
+
 merge_gitattributes() {
   if [ -f .gitattributes ] && grep -qF "$GA_MARK" .gitattributes; then
     say "kept .gitattributes (already has the board rules)"
+    return 0
+  fi
+  if eol_rules_ok; then
+    say "kept .gitattributes (its rules already give tools/board LF and tools/board.cmd CRLF)"
     return 0
   fi
   [ -s .gitattributes ] && [ -n "$(tail -c 1 .gitattributes)" ] && echo >> .gitattributes
@@ -951,7 +962,13 @@ cmd_doctor() {
   if [ -f CLAUDE.md ] && strip_cr < CLAUDE.md | grep -qE '^[[:space:]]*@AGENTS\.md'; then ok "CLAUDE.md imports AGENTS.md"; else note "CLAUDE.md does not import AGENTS.md (only matters for Claude Code)"; fi
   if [ -f .claude/settings.json ] && grep -qF "$HOOK_MARK" .claude/settings.json; then ok "Claude Code hooks installed"; else note "Claude Code hooks not installed (only matters for Claude Code; run tools/board init)"; fi
   if [ -f .claude/settings.json ] && grep -qF "$GUARD_MARK" .claude/settings.json; then ok "guard hook installed (Claude Code can't close the board issue)"; else note "guard hook missing, so nothing stops an agent closing the board issue (run tools/board init)"; fi
-  if [ -f .gitattributes ] && grep -qF "$GA_MARK" .gitattributes; then ok ".gitattributes keeps the script's line endings"; else bad ".gitattributes rules missing; Windows checkouts may break the script (run tools/board init)"; fi
+  if [ -f .gitattributes ] && grep -qF "$GA_MARK" .gitattributes; then
+    ok ".gitattributes keeps the script's line endings"
+  elif eol_rules_ok; then
+    ok ".gitattributes keeps the script's line endings (your own rules: tools/board LF, tools/board.cmd CRLF)"
+  else
+    bad ".gitattributes doesn't keep tools/board as LF and tools/board.cmd as CRLF; Windows checkouts may break the script (run tools/board init)"
+  fi
   if [ -f "$CONF" ] && has_cr "$CONF"; then bad "tools/board.conf has Windows line endings (run tools/board init)"; fi
   case "$(git ls-files -s -- tools/board 2>/dev/null)" in
     "") note "tools/board is not in git yet (commit it)" ;;
