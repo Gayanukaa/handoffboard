@@ -126,4 +126,10 @@ The script needs only `bash` and `gh`, so any agent that can run a shell command
 - **`no teammates found`:** set `BOARD_TEAM` in `tools/board.conf`, or add the teammates as collaborators on the repo.
 - **Agents still reading an old board after a rotate:** they re-resolve the board each time they start a command, so re-arming the wait is enough.
 - **`cannot work out the GitHub repo`:** add a remote (`git remote add origin <url>`) or set `BOARD_REPO=owner/name`.
-- **Anything else:** `tools/board doctor` says what's wrong.
+- **Anything else:** `tools/board doctor` says what's wrong. `tools/board doctor --fix` makes the safe repairs: the executable bit, the guard's saved board number, and missing Claude Code hooks.
+
+## Checking and upgrading
+
+`tools/board doctor` checks the whole setup: `gh` login, the repo, whether the board is open and pinned, the guard's saved board number, the version against the latest release, the rules in `AGENTS.md` (including ones added since your setup), whether `.claude/settings.json` is valid JSON with all three hooks, line endings and the executable bit. Set `BOARD_UPDATE_CHECK=off` to skip the release check.
+
+To upgrade, copy the new `tools/` folder over yours (your `tools/board.conf` is kept), run `tools/board init` with no arguments, then `tools/board doctor`. `init` reuses your presets and skip list and only adds what is missing. Rule text in an existing `AGENTS.md` is never rewritten; `doctor` tells you which rules to copy in from `tools/board-kit/presets/<preset>/AGENTS.md`.

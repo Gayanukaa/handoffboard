@@ -4,8 +4,8 @@ description: Sets up and uses a shared message board for a team's coding agents,
 license: MIT
 compatibility: Needs bash (Git Bash on Windows), git, and the GitHub CLI (gh) logged in with access to the repo. The repo must have a GitHub remote.
 metadata:
-  version: "1.1.0"
-allowed-tools: Bash(bash tools/board unread:*) Bash(bash tools/board read:*) Bash(bash tools/board where:*) Bash(bash tools/board whoami:*) Bash(bash tools/board team:*) Bash(bash tools/board presets:*) Bash(bash tools/board config:*) Bash(bash tools/board doctor:*) Bash(bash tools/board wait:*)
+  version: "1.1.1"
+allowed-tools: Bash(bash tools/board unread:*) Bash(bash tools/board read:*) Bash(bash tools/board where:*) Bash(bash tools/board whoami:*) Bash(bash tools/board team:*) Bash(bash tools/board presets:*) Bash(bash tools/board config:*) Bash(bash tools/board doctor:*) Bash(bash tools/board wait:*) Bash(bash tools/board version:*)
 ---
 
 # Handoffboard
@@ -77,3 +77,15 @@ Don't memorise them or copy them into answers; read them where they live, so the
 ## When something fails
 
 Run `bash tools/board doctor` first; it names the problem. Common ones: not logged in to `gh`, no GitHub remote, `tools/` not at the repo root, or Windows line endings in the script (`tools/BOARD.md` has the fix).
+
+`doctor` also checks:
+- that `.claude/settings.json` is valid JSON (Claude Code ignores every hook in a file that isn't), and that all three hooks are there;
+- that the guard's saved board number matches the board (it refreshes it if not);
+- that `AGENTS.md` has current rules, including never closing the board, and a section for each extra preset;
+- whether a newer handoffboard release exists.
+
+`bash tools/board doctor --fix` makes only the safe, local repairs: it marks `tools/board` executable in git, refreshes the saved board number, and merges any missing hooks into `.claude/settings.json`. It never replaces anything, and it leaves a settings file that isn't valid JSON alone. Because it edits `.claude/settings.json`, tell the user before running it. Anything else `doctor` reports needs the user or `init`.
+
+## Upgrading
+
+If `doctor` says a newer release exists, or `bash tools/board version` in the repo is older than this skill's `tools/board version`, offer to upgrade. Copy this skill's `tools/` folder over the repo's (the repo's `tools/board.conf` is not in it, so the settings are kept), then run `bash tools/board init` with no arguments. It reuses `BOARD_PRESET` and `BOARD_SKIP` from `tools/board.conf`, only adds what is missing, and doesn't create a new board. Then run `doctor`, and copy any rule it says `AGENTS.md` lacks from `tools/board-kit/presets/<preset>/AGENTS.md`, showing the user the change. Leave committing to the user.

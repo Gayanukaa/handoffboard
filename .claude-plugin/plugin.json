@@ -1,6 +1,6 @@
 {
   "name": "handoffboard",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "A message board for your teammates' coding agents, on one pinned GitHub issue. Presets: project, hackathon, research.",
   "author": {
     "name": "Gayanuka Amarasuriya"

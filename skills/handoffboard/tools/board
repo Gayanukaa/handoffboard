@@ -6,6 +6,9 @@
 # Run `tools/board help` for commands.
 set -u
 
+BOARD_VERSION="1.1.1"
+BOARD_UPSTREAM="Gayanukaa/handoffboard"   # where doctor looks for a newer release
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONF="$SCRIPT_DIR/board.conf"
@@ -447,7 +450,7 @@ cmd_where() {
 
 cmd_config() {
   local k v
-  for k in ${1:-BOARD_PRESET BOARD_ISSUE BOARD_LABEL BOARD_TITLE BOARD_INTERVAL BOARD_WAIT BOARD_TEAM BOARD_REQUIRE_LINKS BOARD_REPO BOARD_SKIP}; do
+  for k in ${1:-BOARD_PRESET BOARD_ISSUE BOARD_LABEL BOARD_TITLE BOARD_INTERVAL BOARD_WAIT BOARD_TEAM BOARD_REQUIRE_LINKS BOARD_REPO BOARD_SKIP BOARD_UPDATE_CHECK}; do
     case "$k" in
       BOARD_PRESET) v="$(setting BOARD_PRESET '')" ;;
       BOARD_ISSUE) v="$(setting BOARD_ISSUE auto)" ;;
@@ -458,6 +461,7 @@ cmd_config() {
       BOARD_WAIT) v="$(wait_mode)" ;;
       BOARD_REPO) v="$(setting BOARD_REPO '')" ;;
       BOARD_SKIP) v="$(setting BOARD_SKIP '')" ;;
+      BOARD_UPDATE_CHECK) v="$(setting BOARD_UPDATE_CHECK on)" ;;
       *) die "config: unknown key $k" ;;
     esac
     if [ $# -gt 0 ]; then echo "$v"; else echo "$k=$v"; fi
@@ -916,13 +920,66 @@ NEXT
 
 # ---------------------------------------------------------------- doctor
 
+# True if version $1 is older than $2 (both like 1.2.3; a leading v is ignored).
+ver_lt() {
+  awk -v a="${1#v}" -v b="${2#v}" 'BEGIN {
+    na = split(a, x, "."); nb = split(b, y, "."); n = (na > nb ? na : nb)
+    for (i = 1; i <= n; i++) { if ((x[i] + 0) < (y[i] + 0)) exit 0; if ((x[i] + 0) > (y[i] + 0)) exit 1 }
+    exit 1 }'
+}
+
+# Newest release tag of handoffboard on GitHub ('' if it can't be read or BOARD_UPDATE_CHECK=off).
+latest_release() {
+  case "$(setting BOARD_UPDATE_CHECK on)" in off|OFF|no|false) return 0 ;; esac
+  gh api "repos/$BOARD_UPSTREAM/releases/latest" --jq .tag_name 2>/dev/null | strip_cr | grep -E '^v?[0-9]+(\.[0-9]+)*$'
+}
+
+# JSON check for file $1: 0 valid, 1 invalid, 2 no checker available (jq, python or node).
+json_check() {
+  local py
+  if command -v jq >/dev/null 2>&1; then jq empty "$1" >/dev/null 2>&1 && return 0 || return 1; fi
+  for py in python3 python; do
+    command -v "$py" >/dev/null 2>&1 && "$py" -c 'import json' >/dev/null 2>&1 || continue
+    "$py" -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8-sig"))' "$1" >/dev/null 2>&1 && return 0 || return 1
+  done
+  if command -v node >/dev/null 2>&1; then
+    node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8").replace(/^﻿/, ""))' "$1" >/dev/null 2>&1 && return 0 || return 1
+  fi
+  return 2
+}
+
+# doctor [--fix]. --fix makes only safe, local repairs: the executable bit, the guard's saved board
+# number, and missing Claude Code hooks (merged into .claude/settings.json, never replacing anything).
 cmd_doctor() {
-  local fails=0 res tail st login
+  local fails=0 fix="" res tail st login cached latest p presets jc
+  case "${1:-}" in
+    --fix) fix=1 ;;
+    "") ;;
+    *) die "doctor: unknown arg $1 (use --fix)" ;;
+  esac
   ok()   { echo "  ok    $*"; }
   bad()  { echo "  FAIL  $*"; fails=$((fails + 1)); }
   note() { echo "  warn  $*"; }
 
   cd "$ROOT" || die "cannot open $ROOT"
+  # Read before anything resolves the board, because resolving refreshes it.
+  cached=""
+  [ -s "$STATE_DIR/issue" ] && cached="$(strip_cr < "$STATE_DIR/issue")"
+
+  if [ -n "$fix" ]; then
+    echo "Repairs"
+    chmod +x "$SCRIPT_DIR/board" 2>/dev/null
+    case "$(git ls-files -s -- tools/board 2>/dev/null)" in
+      100755*|"") ;;
+      *) git add --chmod=+x -- tools/board >/dev/null 2>&1 && say "staged tools/board as executable (commit it)" ;;
+    esac
+    if [ -f .claude/settings.json ] && ! json_check .claude/settings.json; then
+      say "left .claude/settings.json alone: it isn't valid JSON (or no jq, python or node to check it)"
+    else
+      merge_settings | grep -v '^  kept'
+    fi
+  fi
+
   echo "Handoffboard check ($ROOT)"
   ok "bash $BASH_VERSION"
   if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -950,18 +1007,69 @@ cmd_doctor() {
         case "$st" in
           "OPEN true") ok "issue #$ISSUE is open and pinned" ;;
           "OPEN false") note "issue #$ISSUE is open but not pinned (pin it so humans find it)" ;;
-          CLOSED*) bad "issue #$ISSUE is closed (run tools/board init, or reopen it)" ;;
+          CLOSED*) bad "issue #$ISSUE is closed (reopen it: gh issue reopen $ISSUE --repo $REPO; or run tools/board init)" ;;
           *) bad "cannot read issue #$ISSUE" ;;
         esac
+        # The guard hook only knows the board by this saved number. Resolving the board just refreshed it.
+        if [ "$cached" = "$ISSUE" ]; then
+          ok "guard's saved board number is #$ISSUE"
+        elif [ -z "$cached" ]; then
+          note "guard had no saved board number; saved #$ISSUE now (the session-start hook also saves it)"
+        else
+          note "guard's saved board number was #$cached, but the board is #$ISSUE (e.g. after a rotate); refreshed to #$ISSUE"
+        fi
         ;;
       *) bad "$(printf '%s' "$res" | head -n 1 | sed 's/^board: //')" ;;
     esac
+    latest="$(latest_release)"
+    if [ -z "$latest" ]; then
+      ok "handoffboard $BOARD_VERSION (could not check for a newer release)"
+    elif ver_lt "$BOARD_VERSION" "$latest"; then
+      note "handoffboard $BOARD_VERSION is older than the latest release $latest. Upgrade: copy the new tools/ folder over this one (tools/board.conf is kept), then run tools/board init"
+    else
+      ok "handoffboard $BOARD_VERSION (latest release: $latest)"
+    fi
   fi
 
-  if [ -f AGENTS.md ] && grep -qF "$AGENTS_MARK" AGENTS.md; then ok "AGENTS.md has the board rules"; else bad "AGENTS.md is missing the board rules (run tools/board init)"; fi
+  # Rules: present, current, and one section per extra preset.
+  if [ -f AGENTS.md ] && grep -qF "$AGENTS_MARK" AGENTS.md; then
+    ok "AGENTS.md has the board rules"
+    if grep -qi 'never close the board' AGENTS.md; then
+      ok "AGENTS.md has the rule never to close the board issue"
+    else
+      note "AGENTS.md is from an older setup: it lacks the rule never to close the board issue. Copy the \"Never close the board issue\" bullet from tools/board-kit/presets/<preset>/AGENTS.md into section 1"
+    fi
+    presets="$(setting BOARD_PRESET '')"
+    for p in $(presets_in "$presets" | tail -n +2); do
+      if grep -qF "<!-- handoffboard:preset $p -->" AGENTS.md; then ok "AGENTS.md has the '$p' preset's section"
+      else note "BOARD_PRESET includes '$p' but AGENTS.md has no section for it (run tools/board init)"; fi
+    done
+  else
+    bad "AGENTS.md is missing the board rules (run tools/board init)"
+  fi
+  for p in $(presets_in "$(setting BOARD_PRESET '')"); do
+    valid_preset "$p" || note "BOARD_PRESET names '$p', but tools/board-kit/presets/$p is missing (init can't add its files)"
+  done
   if [ -f CLAUDE.md ] && strip_cr < CLAUDE.md | grep -qE '^[[:space:]]*@AGENTS\.md'; then ok "CLAUDE.md imports AGENTS.md"; else note "CLAUDE.md does not import AGENTS.md (only matters for Claude Code)"; fi
-  if [ -f .claude/settings.json ] && grep -qF "$HOOK_MARK" .claude/settings.json; then ok "Claude Code hooks installed"; else note "Claude Code hooks not installed (only matters for Claude Code; run tools/board init)"; fi
-  if [ -f .claude/settings.json ] && grep -qF "$GUARD_MARK" .claude/settings.json; then ok "guard hook installed (Claude Code can't close the board issue)"; else note "guard hook missing, so nothing stops an agent closing the board issue (run tools/board init)"; fi
+
+  # Claude Code settings: must parse, or Claude Code ignores every hook in it.
+  if [ ! -f .claude/settings.json ]; then
+    note "no .claude/settings.json, so no Claude Code hooks (only matters for Claude Code; run tools/board doctor --fix)"
+  else
+    json_check .claude/settings.json; jc=$?
+    case "$jc" in
+      0) ok ".claude/settings.json is valid JSON" ;;
+      1) bad ".claude/settings.json is not valid JSON, so Claude Code ignores its hooks. Fix the syntax by hand" ;;
+      *) note "can't check .claude/settings.json is valid JSON (needs jq, python or node)" ;;
+    esac
+    if grep -qF "$HOOK_MARK" .claude/settings.json && grep -qF 'tools/board\" hook prompt' .claude/settings.json; then
+      ok "Claude Code hooks installed (session start, every prompt)"
+    else
+      note "Claude Code board hooks missing (run tools/board doctor --fix)"
+    fi
+    if grep -qF "$GUARD_MARK" .claude/settings.json; then ok "guard hook installed (Claude Code can't close the board issue)"; else note "guard hook missing, so nothing stops an agent closing the board issue (run tools/board doctor --fix)"; fi
+  fi
+
   if [ -f .gitattributes ] && grep -qF "$GA_MARK" .gitattributes; then
     ok ".gitattributes keeps the script's line endings"
   elif eol_rules_ok; then
@@ -973,7 +1081,7 @@ cmd_doctor() {
   case "$(git ls-files -s -- tools/board 2>/dev/null)" in
     "") note "tools/board is not in git yet (commit it)" ;;
     100755*) ok "tools/board is tracked in git as executable" ;;
-    *) note "tools/board is tracked without the executable bit; run: git add --chmod=+x tools/board (until then use: bash tools/board)" ;;
+    *) note "tools/board is tracked without the executable bit (run tools/board doctor --fix; until then use: bash tools/board)" ;;
   esac
   echo "  info  preset: $(setting BOARD_PRESET '(none)'), background wait: $(wait_mode), interval $(setting BOARD_INTERVAL 30)s"
 
@@ -1032,11 +1140,13 @@ tools/board presets [--files]  list the presets (project, hackathon, research) a
 tools/board init [--preset P[,P2]] [--skip FILE[,FILE]]
                                one-time setup: merge the board into this repo, create and pin the issue.
                                Several presets combine (main one first); --skip leaves out preset files
-tools/board doctor             check that everything is set up for you
+tools/board doctor [--fix]     check that everything is set up for you; --fix makes the safe repairs
+                               (executable bit, guard's saved board number, missing Claude Code hooks)
+tools/board version            this script's version
 tools/board rotate [--title T] [--summary S]
                                start a fresh board issue and close the current one
 tools/board config [KEY]       show the effective settings
-Settings: tools/board.conf (BOARD_PRESET, BOARD_ISSUE, BOARD_LABEL, BOARD_TITLE, BOARD_INTERVAL, BOARD_WAIT, BOARD_TEAM, BOARD_REQUIRE_LINKS, BOARD_REPO, BOARD_SKIP);
+Settings: tools/board.conf (BOARD_PRESET, BOARD_ISSUE, BOARD_LABEL, BOARD_TITLE, BOARD_INTERVAL, BOARD_WAIT, BOARD_TEAM, BOARD_REQUIRE_LINKS, BOARD_REPO, BOARD_SKIP, BOARD_UPDATE_CHECK);
 an environment variable with the same name overrides it. Windows PowerShell/cmd: tools\\board.cmd <command>
 USAGE
 }
@@ -1051,7 +1161,8 @@ case "${1:-help}" in
   team)   shift; cmd_team ;;
   presets) shift; print_presets "${1:-}" ;;
   init)   shift; cmd_init "$@" ;;
-  doctor) cmd_doctor ;;
+  doctor) shift; cmd_doctor "$@" ;;
+  version|--version) echo "handoffboard $BOARD_VERSION" ;;
   rotate) shift; cmd_rotate "$@" ;;
   config) shift; cmd_config "$@" ;;
   hook)   shift; cmd_hook "$@" ;;
